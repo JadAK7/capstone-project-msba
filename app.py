@@ -222,12 +222,9 @@ if 'api_key_set' not in st.session_state:
 with st.sidebar:
     st.title("⚙️ Settings")
     
-    # API Key input
-    api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        help="Enter your OpenAI API key to use the chatbot"
-    )
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+    if not api_key:
+        api_key = st.text_input("OpenAI API Key", type="password")
     
     if api_key and not st.session_state.api_key_set:
         try:
