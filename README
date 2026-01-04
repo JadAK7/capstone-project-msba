@@ -1,64 +1,224 @@
-# Library FAQ Chatbot (Retrieval-Based QA System)
+# 📚 Library Chatbot
 
-## Project Overview
-This project is a **retrieval-based chatbot** designed to answer library-related questions accurately using a curated FAQ dataset.  
-Instead of generating answers freely, the system retrieves the most relevant existing FAQ entry and responds using that trusted information.
+An intelligent chatbot that answers library FAQs and provides personalized database recommendations using RAG (Retrieval-Augmented Generation) with OpenAI embeddings.
 
-This design prioritizes:
-- Accuracy for library policies
-- Low hallucination risk
-- Clear evaluation and extensibility
+## ✨ Features
 
-The chatbot was developed as a **v1 baseline system**, with clear upgrade paths to full website-based RAG (Retrieval-Augmented Generation).
+- 💬 **Interactive Chat Interface** - Clean, modern UI built with Streamlit
+- 📖 **FAQ Answering** - Instant answers to common library questions
+- 🔎 **Database Recommendations** - Smart suggestions based on research topics
+- 🎯 **Intent Detection** - Automatically understands query type
+- 📊 **Real-time Statistics** - Track usage and performance
+- 🎛️ **Adjustable Thresholds** - Fine-tune confidence levels
+- 🔍 **Debug Mode** - See exactly what the model is matching
 
----
+## 🚀 Quick Start
 
-## How the System Works (High Level)
-1. A library FAQ dataset is stored in a CSV file.
-2. Each FAQ question (optionally combined with its answer) is converted into an embedding.
-3. User questions are embedded using the same model.
-4. Cosine similarity is used to retrieve the most relevant FAQ(s).
-5. The bot:
-   - answers confidently when similarity is high,
-   - asks for clarification when results are ambiguous,
-   - or falls back when confidence is low.
-6. Responses can be returned verbatim or rewritten by an LLM using the retrieved answer as ground truth.
+### Prerequisites
 
----
+- Python 3.8+
+- OpenAI API key ([Get one here](https://platform.openai.com/api-keys))
 
-## Project Structure
-library-faq-bot/
-│
-├── Library FAQ.csv # Original FAQ dataset (unchanged)
-├── library_faq_clean.csv # Cleaned and normalized FAQ data
-├── faq_index.pkl # Stored embeddings + metadata
-│
-├── clean_faq.py # Cleans and prepares the FAQ dataset
-├── build_index.py # Builds the embedding index
-├── chat.py # Command-line chatbot interface
-│
-└── README.md # Project documentation
+### Installation
 
----
+```bash
+# Clone the repository
+git clone <your-repo-url>
+cd library-chatbot
 
-## OpenAI API Key Setup
-The OpenAI API key must be provided as an environment variable:
-export OPENAI_API_KEY="sk-xxxxxxxxxxxxxxxx"
+# Install dependencies
+pip install -r requirements.txt
 
-## Cleaning the FAQ Dataset
-Run the cleaning script to normalize and prepare the FAQ data:
-```
-python clean_faq.py
+# Build the embedding indices (required first time)
+python build_index.py
+
+# Run the Streamlit app
+streamlit run app.py
 ```
 
-## Building the Embedding Index
-Create the embedding index from the cleaned FAQ data:
+### First-Time Setup
+
+1. The app will open in your browser at `http://localhost:8501`
+2. Enter your OpenAI API key in the sidebar
+3. Wait for initialization (~2-3 seconds)
+4. Start chatting!
+
+## 📁 Project Structure
+
 ```
+library-chatbot/
+├── app.py                      # Streamlit web interface
+├── build_index.py              # Builds embedding indices
+├── chat.py                     # CLI version (optional)
+├── requirements.txt            # Python dependencies
+├── library_faq_clean.csv       # FAQ source data
+├── Databases description.csv   # Database source data
+├── .gitignore                  # Git ignore rules
+├── README.md                   # This file
+└── SETUP_GUIDE.md             # Detailed setup instructions
+```
+
+**Generated files (not in Git):**
+- `faq_text.parquet`, `faq_emb.npy` - FAQ embeddings
+- `db_text.parquet`, `db_emb.npy` - Database embeddings
+
+## 💡 Usage Examples
+
+### Library Service Questions
+```
+"What are your opening hours?"
+"How do I renew a book?"
+"Can I access databases from home?"
+```
+
+### Database Recommendations
+```
+"Which database should I use for engineering articles?"
+"Where can I find medical research papers?"
+"Best source for computer science conference papers?"
+```
+
+## 🔧 Configuration
+
+### Adjusting Confidence Thresholds
+
+In the app sidebar under "Advanced Settings":
+- **FAQ Confidence**: 0.60 (default) - Higher = stricter FAQ matching
+- **Database Confidence**: 0.45 (default) - Higher = stricter DB matching
+
+### Rebuilding Indices
+
+If you update your CSV files:
+
+```bash
 python build_index.py
 ```
 
-## Running the Chatbot
-Start the command-line chatbot interface:
+Then restart the Streamlit app.
+
+## 🌐 Deployment
+
+### Streamlit Community Cloud (Recommended)
+
+1. **Push to GitHub** - Push ALL Python files and CSV files (but NOT .parquet or .npy files)
+2. Visit [share.streamlit.io](https://share.streamlit.io)
+3. Connect your repository and select `app.py`
+4. **IMPORTANT: Add your API key in Secrets**:
+   - Click "Advanced settings" → "Secrets"
+   - Add:
+     ```toml
+     OPENAI_API_KEY = "sk-your-actual-key-here"
+     ```
+5. Deploy!
+
+**First deployment will take 2-3 minutes** as it builds the embedding indices automatically.
+
+See [SETUP_GUIDE.md](SETUP_GUIDE.md) for Docker and other deployment options.
+
+## 📊 Architecture
+
 ```
+User Query
+    ↓
+Query Embedding (OpenAI)
+    ↓
+Parallel Search
+    ├─→ FAQ Retriever (cosine similarity)
+    └─→ DB Retriever (cosine similarity)
+    ↓
+Intent Detection
+    ↓
+Response Router
+    ├─→ FAQ Answer
+    ├─→ DB Recommendations
+    ├─→ Both (hybrid)
+    └─→ Clarification Request
+    ↓
+Formatted Response
+```
+
+## 🧪 Tech Stack
+
+- **Frontend**: Streamlit
+- **Embeddings**: OpenAI text-embedding-3-small
+- **Similarity Search**: Cosine similarity with numpy
+- **Data Storage**: Parquet + NumPy arrays
+- **Language**: Python 3.8+
+
+## 💰 Cost Estimation
+
+Using `text-embedding-3-small`:
+- Cost: ~$0.02 per 1M tokens
+- Average query: ~50 tokens
+- **Cost per query: ~$0.000001** (essentially free for normal use)
+
+Monitor usage at: https://platform.openai.com/usage
+
+## 🛠️ Development
+
+### Running CLI Version
+
+```bash
 python chat.py
 ```
+
+### Running Tests (if you add them)
+
+```bash
+pytest tests/
+```
+
+### Code Style
+
+```bash
+# Format code
+black *.py
+
+# Lint
+flake8 *.py
+```
+
+## 🐛 Troubleshooting
+
+### "FileNotFoundError: faq_text.parquet"
+```bash
+python build_index.py
+```
+
+### "OpenAI API Error"
+- Verify API key is correct
+- Check account has credits
+- Ensure internet connection
+
+### Slow Performance
+- First query is slower (embedding generation)
+- Subsequent queries use cached embeddings
+- Check OpenAI API status
+
+See [SETUP_GUIDE.md](SETUP_GUIDE.md) for more troubleshooting tips.
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- OpenAI for embedding models
+- Streamlit for the awesome framework
+- Your library team for the data
+
+## 📞 Contact
+
+For questions or support, please open an issue on GitHub.
+
+---
+
+**Note**: Remember to run `python build_index.py` before first use and after updating CSV files!
