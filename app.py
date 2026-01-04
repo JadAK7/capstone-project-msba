@@ -1,6 +1,7 @@
 """
 app.py
 Streamlit interface for Library Chatbot with FAQ and database recommendations.
+Auto-builds indices if not present (for Streamlit Cloud deployment).
 Run with: streamlit run app.py
 """
 
@@ -10,7 +11,7 @@ import pandas as pd
 from openai import OpenAI
 import re
 from typing import List, Tuple
-from dataclasses import dataclass
+from pathlib import Path
 import logging
 
 # Configure
@@ -27,17 +28,86 @@ st.set_page_config(
 
 # Configuration
 class Config:
+    # Source data paths
+    FAQ_SOURCE = "library_faq_clean.csv"
+    DB_SOURCE = "Databases description.csv"
+    
+    # Generated index paths
     FAQ_TEXT_PATH = "faq_text.parquet"
     FAQ_EMB_PATH = "faq_emb.npy"
     DB_TEXT_PATH = "db_text.parquet"
     DB_EMB_PATH = "db_emb.npy"
     
     EMBEDDING_MODEL = "text-embedding-3-small"
+    EMBEDDING_BATCH_SIZE = 200
     
     FAQ_HIGH_CONFIDENCE = 0.70
     FAQ_MIN_CONFIDENCE = 0.60
     DB_MIN_CONFIDENCE = 0.45
     BOTH_DELTA = 0.06
+
+class IndexBuilder:
+    """Builds indices if they don't exist."""
+    
+    @staticmethod
+    def sanitize_matrix(m: np.ndarray) -> np.ndarray:
+        m = np.asarray(m, dtype=np.float32)
+        m = np.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0)
+        m = np.clip(m, -10.0, 10.0)
+        norms = np.linalg.norm(m, axis=1, keepdims=True)
+        m = m / np.clip(norms, 1e-12, None)
+        return np.ascontiguousarray(m)
+    
+    @staticmethod
+    def embed_batch(client: OpenAI, text_list: List[str], 
+                   model: str = Config.EMBEDDING_MODEL,
+                   batch_size: int = Config.EMBEDDING_BATCH_SIZE) -> np.ndarray:
+        """Generate embeddings for a list of texts."""
+        embeddings = []
+        
+        for i in range(0, len(text_list), batch_size):
+            batch = text_list[i:i + batch_size]
+            resp = client.embeddings.create(model=model, input=batch)
+            embeddings.extend([d.embedding for d in resp.data])
+        
+        arr = np.array(embeddings, dtype=np.float32)
+        return IndexBuilder.sanitize_matrix(arr)
+    
+    @staticmethod
+    def indices_exist() -> bool:
+        """Check if all index files exist."""
+        return all(Path(p).exists() for p in [
+            Config.FAQ_TEXT_PATH,
+            Config.FAQ_EMB_PATH,
+            Config.DB_TEXT_PATH,
+            Config.DB_EMB_PATH
+        ])
+    
+    @staticmethod
+    def build_indices(client: OpenAI) -> None:
+        """Build all indices from source CSV files."""
+        # Build FAQ index
+        faq = pd.read_csv(Config.FAQ_SOURCE)
+        faq["question"] = faq["question"].fillna("").astype(str).str.strip()
+        faq["answer"] = faq["answer"].fillna("").astype(str).str.strip()
+        faq = faq[(faq["question"] != "") & (faq["answer"] != "")].reset_index(drop=True)
+        
+        faq_emb = IndexBuilder.embed_batch(client, faq["question"].tolist())
+        
+        faq[["question", "answer"]].to_parquet(Config.FAQ_TEXT_PATH, index=False)
+        np.save(Config.FAQ_EMB_PATH, faq_emb)
+        
+        # Build Database index
+        db = pd.read_csv(Config.DB_SOURCE)
+        db["name"] = db["name"].fillna("").astype(str).str.strip()
+        db["description"] = db["description"].fillna("").astype(str).str.strip()
+        db = db[(db["name"] != "") & (db["description"] != "")].reset_index(drop=True)
+        
+        db_text = (db["name"] + ". " + db["description"]).tolist()
+        db_emb = IndexBuilder.embed_batch(client, db_text)
+        
+        db[["name", "description"]].to_parquet(Config.DB_TEXT_PATH, index=False)
+        np.save(Config.DB_EMB_PATH, db_emb)
 
 class EmbeddingUtils:
     """Utilities for safe embedding operations."""
@@ -109,18 +179,28 @@ class Retriever:
         top_indices = np.argsort(-similarities)[:k]
         return [(int(idx), float(similarities[idx])) for idx in top_indices]
 
-@dataclass
-class ChatMessage:
-    role: str  # 'user' or 'assistant'
-    content: str
-    faq_results: List[Tuple[int, float]] = None
-    db_results: List[Tuple[int, float]] = None
-
 class LibraryChatbot:
     """Main chatbot class."""
     
     def __init__(self, api_key: str):
         self.client = OpenAI(api_key=api_key)
+        
+        # Check if indices need to be built
+        if not IndexBuilder.indices_exist():
+            st.info("🔨 Building indices for first time. This will take 1-2 minutes...")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            try:
+                status_text.text("Building FAQ index...")
+                progress_bar.progress(25)
+                IndexBuilder.build_indices(self.client)
+                progress_bar.progress(100)
+                status_text.text("✅ Indices built successfully!")
+                st.success("Indices created! Starting chatbot...")
+            except Exception as e:
+                st.error(f"❌ Error building indices: {e}")
+                raise
         
         # Load FAQ data
         self.faq_df = pd.read_parquet(Config.FAQ_TEXT_PATH)
@@ -155,7 +235,6 @@ class LibraryChatbot:
         show_faq = best_faq_score >= Config.FAQ_MIN_CONFIDENCE
         show_db = is_db_intent or best_db_score >= Config.DB_MIN_CONFIDENCE
         
-        # Determine response
         if show_faq and best_faq_score >= Config.FAQ_HIGH_CONFIDENCE and not show_db:
             answer = self._format_faq_answer(best_faq_idx)
             return answer, faq_results[:1], []
@@ -222,9 +301,16 @@ if 'api_key_set' not in st.session_state:
 with st.sidebar:
     st.title("⚙️ Settings")
     
-    api_key = st.secrets.get("OPENAI_API_KEY", "")
-    if not api_key:
-        api_key = st.text_input("OpenAI API Key", type="password")
+    # API Key input
+    # Try to get from secrets first (for Streamlit Cloud)
+    default_api_key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, 'secrets') else ""
+    
+    api_key = st.text_input(
+        "OpenAI API Key",
+        value=default_api_key,
+        type="password",
+        help="Enter your OpenAI API key to use the chatbot"
+    )
     
     if api_key and not st.session_state.api_key_set:
         try:
@@ -242,7 +328,7 @@ with st.sidebar:
         st.subheader("📊 Statistics")
         st.metric("Total FAQs", len(st.session_state.chatbot.faq_df))
         st.metric("Total Databases", len(st.session_state.chatbot.db_df))
-        st.metric("Messages Sent", len([m for m in st.session_state.messages if m.role == 'user']))
+        st.metric("Messages Sent", len([m for m in st.session_state.messages if m['role'] == 'user']))
     
     st.divider()
     
@@ -282,8 +368,8 @@ st.markdown("Ask me about library services or get personalized database recommen
 
 # Display chat history
 for message in st.session_state.messages:
-    with st.chat_message(message.role):
-        st.markdown(message.content)
+    with st.chat_message(message['role']):
+        st.markdown(message['content'])
 
 # Chat input
 if not st.session_state.api_key_set:
@@ -291,7 +377,7 @@ if not st.session_state.api_key_set:
 else:
     if prompt := st.chat_input("Ask about library services or database recommendations..."):
         # Add user message
-        st.session_state.messages.append(ChatMessage(role="user", content=prompt))
+        st.session_state.messages.append({'role': 'user', 'content': prompt})
         
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -304,14 +390,10 @@ else:
                     st.markdown(answer)
                     
                     # Store assistant message
-                    st.session_state.messages.append(
-                        ChatMessage(
-                            role="assistant",
-                            content=answer,
-                            faq_results=faq_res,
-                            db_results=db_res
-                        )
-                    )
+                    st.session_state.messages.append({
+                        'role': 'assistant',
+                        'content': answer
+                    })
                     
                     # Show debug info in expander
                     with st.expander("🔍 Debug Info"):
