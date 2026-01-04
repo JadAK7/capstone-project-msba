@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 st.set_page_config(
     page_title="Library Chatbot",
     page_icon="📚",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
 
 # Configuration
@@ -297,70 +297,23 @@ if 'chatbot' not in st.session_state:
 if 'api_key_set' not in st.session_state:
     st.session_state.api_key_set = False
 
-# Sidebar
-with st.sidebar:
-    st.title("⚙️ Settings")
-    
-    # API Key input
-    # Try to get from secrets first (for Streamlit Cloud)
-    default_api_key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, 'secrets') else ""
-    
-    api_key = st.text_input(
-        "OpenAI API Key",
-        value=default_api_key,
-        type="password",
-        help="Enter your OpenAI API key to use the chatbot"
-    )
-    
-    if api_key and not st.session_state.api_key_set:
-        try:
-            with st.spinner("Initializing chatbot..."):
-                st.session_state.chatbot = LibraryChatbot(api_key)
-                st.session_state.api_key_set = True
-            st.success("✅ Chatbot initialized!")
-        except Exception as e:
-            st.error(f"❌ Error initializing: {e}")
-    
-    st.divider()
-    
-    # Statistics
-    if st.session_state.chatbot:
-        st.subheader("📊 Statistics")
-        st.metric("Total FAQs", len(st.session_state.chatbot.faq_df))
-        st.metric("Total Databases", len(st.session_state.chatbot.db_df))
-        st.metric("Messages Sent", len([m for m in st.session_state.messages if m['role'] == 'user']))
-    
-    st.divider()
-    
-    # Threshold controls
-    with st.expander("🎛️ Advanced Settings"):
-        Config.FAQ_MIN_CONFIDENCE = st.slider(
-            "FAQ Confidence Threshold",
-            0.0, 1.0, 0.60, 0.05,
-            help="Minimum confidence for FAQ answers"
-        )
-        Config.DB_MIN_CONFIDENCE = st.slider(
-            "Database Confidence Threshold",
-            0.0, 1.0, 0.45, 0.05,
-            help="Minimum confidence for database recommendations"
-        )
-    
-    st.divider()
-    
-    # Clear chat button
-    if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
-    
-    st.divider()
-    
-    # Info
-    st.markdown("""
-    ### 💡 Tips
-    - Ask about library policies and services
-    - Request database recommendations for your research
-    - Be specific about your research topic
-    """)
+# Initialize API key from secrets only (no user input)
+if not st.session_state.api_key_set:
+    try:
+        # Get API key from Streamlit secrets
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
+        
+        if not api_key:
+            st.error("⚠️ API key not configured. Please contact the administrator.")
+            st.stop()
+        
+        with st.spinner("Initializing chatbot..."):
+            st.session_state.chatbot = LibraryChatbot(api_key)
+            st.session_state.api_key_set = True
+            
+    except Exception as e:
+        st.error(f"❌ Error initializing chatbot: {e}")
+        st.stop()
 
 # Main content
 st.title("📚 Library Chatbot")
@@ -372,44 +325,41 @@ for message in st.session_state.messages:
         st.markdown(message['content'])
 
 # Chat input
-if not st.session_state.api_key_set:
-    st.info("👈 Please enter your OpenAI API key in the sidebar to start chatting.")
-else:
-    if prompt := st.chat_input("Ask about library services or database recommendations..."):
-        # Add user message
-        st.session_state.messages.append({'role': 'user', 'content': prompt})
-        
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Generate response
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    answer, faq_res, db_res = st.session_state.chatbot.answer(prompt)
-                    st.markdown(answer)
-                    
-                    # Store assistant message
-                    st.session_state.messages.append({
-                        'role': 'assistant',
-                        'content': answer
-                    })
-                    
-                    # Show debug info in expander
-                    with st.expander("🔍 Debug Info"):
-                        if faq_res:
-                            st.write("**FAQ Results:**")
-                            for idx, score in faq_res:
-                                st.write(f"- {st.session_state.chatbot.faq_df.loc[idx, 'question'][:100]}... ({score:.3f})")
-                        
-                        if db_res:
-                            st.write("**Database Results:**")
-                            for idx, score in db_res:
-                                st.write(f"- {st.session_state.chatbot.db_df.loc[idx, 'name']} ({score:.3f})")
+if prompt := st.chat_input("Ask about library services or database recommendations..."):
+    # Add user message
+    st.session_state.messages.append({'role': 'user', 'content': prompt})
+    
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    
+    # Generate response
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            try:
+                answer, faq_res, db_res = st.session_state.chatbot.answer(prompt)
+                st.markdown(answer)
                 
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
-                    logger.error(f"Error processing query: {e}", exc_info=True)
+                # Store assistant message
+                st.session_state.messages.append({
+                    'role': 'assistant',
+                    'content': answer
+                })
+                
+                # Show debug info in expander
+                with st.expander("🔍 Debug Info"):
+                    if faq_res:
+                        st.write("**FAQ Results:**")
+                        for idx, score in faq_res:
+                            st.write(f"- {st.session_state.chatbot.faq_df.loc[idx, 'question'][:100]}... ({score:.3f})")
+                    
+                    if db_res:
+                        st.write("**Database Results:**")
+                        for idx, score in db_res:
+                            st.write(f"- {st.session_state.chatbot.db_df.loc[idx, 'name']} ({score:.3f})")
+            
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
+                logger.error(f"Error processing query: {e}", exc_info=True)
 
 # Footer
 st.divider()
