@@ -1,0 +1,64 @@
+# Library FAQ Chatbot (Retrieval-Based QA System)
+
+## Project Overview
+This project is a **retrieval-based chatbot** designed to answer library-related questions accurately using a curated FAQ dataset.  
+Instead of generating answers freely, the system retrieves the most relevant existing FAQ entry and responds using that trusted information.
+
+This design prioritizes:
+- Accuracy for library policies
+- Low hallucination risk
+- Clear evaluation and extensibility
+
+The chatbot was developed as a **v1 baseline system**, with clear upgrade paths to full website-based RAG (Retrieval-Augmented Generation).
+
+---
+
+## How the System Works (High Level)
+1. A library FAQ dataset is stored in a CSV file.
+2. Each FAQ question (optionally combined with its answer) is converted into an embedding.
+3. User questions are embedded using the same model.
+4. Cosine similarity is used to retrieve the most relevant FAQ(s).
+5. The bot:
+   - answers confidently when similarity is high,
+   - asks for clarification when results are ambiguous,
+   - or falls back when confidence is low.
+6. Responses can be returned verbatim or rewritten by an LLM using the retrieved answer as ground truth.
+
+---
+
+## Project Structure
+library-faq-bot/
+│
+├── Library FAQ.csv # Original FAQ dataset (unchanged)
+├── library_faq_clean.csv # Cleaned and normalized FAQ data
+├── faq_index.pkl # Stored embeddings + metadata
+│
+├── clean_faq.py # Cleans and prepares the FAQ dataset
+├── build_index.py # Builds the embedding index
+├── chat.py # Command-line chatbot interface
+│
+└── README.md # Project documentation
+
+---
+
+## OpenAI API Key Setup
+The OpenAI API key must be provided as an environment variable:
+export OPENAI_API_KEY="sk-xxxxxxxxxxxxxxxx"
+
+## Cleaning the FAQ Dataset
+Run the cleaning script to normalize and prepare the FAQ data:
+```
+python clean_faq.py
+```
+
+## Building the Embedding Index
+Create the embedding index from the cleaned FAQ data:
+```
+python build_index.py
+```
+
+## Running the Chatbot
+Start the command-line chatbot interface:
+```
+python chat.py
+```
