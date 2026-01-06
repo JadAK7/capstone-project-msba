@@ -1,0 +1,16 @@
+name: Ping app
+
+on:
+  schedule:
+    # every 10 minutes
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Curl ping
+        run: |
+          URL="https://aub-library-chatbot.streamlit.app"
+          curl -L --fail --silent --show-error "$URL" > /dev/null
