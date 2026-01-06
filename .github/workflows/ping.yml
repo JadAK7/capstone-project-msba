@@ -12,5 +12,4 @@ jobs:
     steps:
       - name: Curl ping
         run: |
-          URL="https://aub-library-chatbot.streamlit.app"
-          curl -L --fail --silent --show-error "$URL" > /dev/null
+          curl --fail --silent --show-error "https://aub-library-chatbot.streamlit.app/_stcore/health" > /dev/null
