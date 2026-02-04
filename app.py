@@ -20,11 +20,206 @@ logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
-    page_title="Library Chatbot",
+    page_title="AUB Libraries Assistant",
     page_icon="📚",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
+
+# ── AUB-branded custom CSS ──────────────────────────────────────────────────
+st.markdown("""
+<style>
+    /* Import Roboto font */
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
+    /* Global font */
+    html, body, [class*="css"] {
+        font-family: 'Roboto', sans-serif;
+    }
+
+    /* Hide default Streamlit header/footer */
+    #MainMenu {visibility: hidden;}
+    header[data-testid="stHeader"] {
+        background: transparent;
+    }
+    footer {visibility: hidden;}
+
+    /* AUB Header Banner */
+    .aub-header {
+        background-color: #840132;
+        padding: 1.2rem 2rem;
+        margin: -6rem -4rem 0 -4rem;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    .aub-header-content {
+        display: flex;
+        flex-direction: column;
+    }
+    .aub-header h1 {
+        color: white;
+        font-family: 'Roboto', sans-serif;
+        font-size: 1.6rem;
+        font-weight: 700;
+        margin: 0;
+        letter-spacing: 0.5px;
+    }
+    .aub-header p {
+        color: rgba(255,255,255,0.85);
+        font-size: 0.85rem;
+        margin: 0.2rem 0 0 0;
+        font-weight: 300;
+    }
+    .aub-accent-bar {
+        height: 4px;
+        background: linear-gradient(90deg, #ee3524, #840132);
+        margin: 0 -4rem 1.5rem -4rem;
+    }
+
+    /* Subtitle area */
+    .aub-subtitle {
+        text-align: center;
+        color: #424242;
+        font-size: 1rem;
+        margin-bottom: 1.5rem;
+        padding: 0.8rem 1rem;
+        background-color: #f9f5f6;
+        border-left: 4px solid #840132;
+        border-radius: 0 6px 6px 0;
+    }
+
+    /* Chat messages styling */
+    [data-testid="stChatMessage"] {
+        border-radius: 10px;
+        margin-bottom: 0.8rem;
+        border: 1px solid #e8e0e2;
+    }
+
+    /* User message */
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+        background-color: #f9f5f6;
+        border-left: 3px solid #840132;
+    }
+
+    /* Assistant message */
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
+        background-color: #ffffff;
+        border-left: 3px solid #ee3524;
+    }
+
+    /* Chat input */
+    [data-testid="stChatInput"] textarea {
+        border: 2px solid #d1d2d2;
+        border-radius: 8px;
+        font-family: 'Roboto', sans-serif;
+    }
+    [data-testid="stChatInput"] textarea:focus {
+        border-color: #840132;
+        box-shadow: 0 0 0 1px #840132;
+    }
+
+    /* Chat input submit button */
+    [data-testid="stChatInput"] button {
+        background-color: #840132 !important;
+        color: white !important;
+        border-radius: 8px;
+    }
+    [data-testid="stChatInput"] button:hover {
+        background-color: #6b0129 !important;
+    }
+
+    /* Spinner */
+    .stSpinner > div {
+        border-top-color: #840132 !important;
+    }
+
+    /* Expander (debug info) */
+    [data-testid="stExpander"] {
+        border: 1px solid #e8e0e2;
+        border-radius: 8px;
+    }
+    [data-testid="stExpander"] summary {
+        color: #840132;
+        font-weight: 500;
+    }
+
+    /* Links */
+    a {
+        color: #840132 !important;
+    }
+    a:hover {
+        color: #ee3524 !important;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        background-color: #840132;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font-family: 'Roboto', sans-serif;
+        font-weight: 500;
+    }
+    .stButton > button:hover {
+        background-color: #6b0129;
+        color: white;
+    }
+
+    /* Progress bar */
+    .stProgress > div > div {
+        background-color: #840132;
+    }
+
+    /* Divider */
+    hr {
+        border-color: #e8e0e2;
+    }
+
+    /* AUB Footer */
+    .aub-footer {
+        background-color: #424242;
+        color: #d1d2d2;
+        padding: 1.5rem 2rem;
+        margin: 2rem -4rem -4rem -4rem;
+        text-align: center;
+        font-size: 0.85rem;
+    }
+    .aub-footer a {
+        color: #ee3524 !important;
+        text-decoration: none;
+    }
+    .aub-footer a:hover {
+        color: #ffffff !important;
+        text-decoration: underline;
+    }
+    .aub-footer-links {
+        display: flex;
+        justify-content: center;
+        gap: 1.5rem;
+        margin-top: 0.5rem;
+        flex-wrap: wrap;
+    }
+    .aub-footer-divider {
+        height: 2px;
+        background-color: #ee3524;
+        width: 60px;
+        margin: 0.8rem auto;
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+        width: 8px;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #840132;
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-track {
+        background: #f5f0f0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Configuration
 class Config:
@@ -207,7 +402,7 @@ class LibraryChatbot:
         
         # Check if indices need to be built
         if not IndexBuilder.indices_exist():
-            st.info("🔨 Building indices for first time. This will take 1-2 minutes...")
+            st.info("Building indices for first time setup...")
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -216,10 +411,10 @@ class LibraryChatbot:
                 progress_bar.progress(25)
                 IndexBuilder.build_indices(self.client)
                 progress_bar.progress(100)
-                status_text.text("✅ Indices built successfully!")
+                status_text.text("Indices built successfully!")
                 st.success("Indices created! Starting chatbot...")
             except Exception as e:
-                st.error(f"❌ Error building indices: {e}")
+                st.error(f"Error building indices: {e}")
                 raise
         
         # Load FAQ data
@@ -310,10 +505,10 @@ class LibraryChatbot:
     
     def _format_faq_answer(self, idx: int) -> str:
         answer = self.faq_df.loc[idx, "answer"]
-        return f"📖 **FAQ Answer**\n\n{answer}"
+        return f"**FAQ Answer**\n\n{answer}"
     
     def _format_db_recommendations(self, results: List[Tuple[int, float]]) -> str:
-        lines = ["🔎 **Recommended Databases**\n"]
+        lines = ["**Recommended Databases**\n"]
         
         for idx, score in results:
             name = self.db_df.loc[idx, "name"]
@@ -369,11 +564,11 @@ class LibraryChatbot:
 
         answer = resp.choices[0].message.content
         source_links = " | ".join(sources)
-        return f"📄 {answer}\n\n**Sources:** {source_links}"
+        return f"{answer}\n\n**Sources:** {source_links}"
 
     def _format_unclear(self) -> str:
         return (
-            "🤔 **I'm not quite sure how to help.** You can:\n\n"
+            "**I'm not quite sure how to help.** You can:\n\n"
             "- Ask about library services (hours, borrowing, access, etc.)\n"
             "- Request database recommendations for your research topic\n\n"
             "**Example:** *'Which databases should I use for engineering articles?'*"
@@ -396,7 +591,7 @@ if not st.session_state.api_key_set:
         api_key = st.secrets.get("OPENAI_API_KEY", "")
         
         if not api_key:
-            st.error("⚠️ API key not configured. Please contact the administrator.")
+            st.error("API key not configured. Please contact the administrator.")
             st.stop()
         
         with st.spinner("Initializing chatbot..."):
@@ -404,12 +599,24 @@ if not st.session_state.api_key_set:
             st.session_state.api_key_set = True
             
     except Exception as e:
-        st.error(f"❌ Error initializing chatbot: {e}")
+        st.error(f"Error initializing chatbot: {e}")
         st.stop()
 
-# Main content
-st.title("📚 Library Chatbot")
-st.markdown("Ask me about library services or get personalized database recommendations!")
+# AUB Header
+st.markdown("""
+<div class="aub-header">
+    <div class="aub-header-content">
+        <h1>AUB Libraries Assistant</h1>
+        <p>American University of Beirut — University Libraries</p>
+    </div>
+</div>
+<div class="aub-accent-bar"></div>
+""", unsafe_allow_html=True)
+
+st.markdown(
+    '<div class="aub-subtitle">Ask me about library services, research databases, or find resources for your studies.</div>',
+    unsafe_allow_html=True
+)
 
 # Display chat history
 for message in st.session_state.messages:
@@ -440,7 +647,7 @@ if prompt := st.chat_input("Ask about library services or database recommendatio
                 bot = st.session_state.chatbot
 
                 # Show debug info in expander
-                with st.expander("🔍 Debug Info"):
+                with st.expander("Debug Info"):
                     st.write(f"**Chosen source:** `{debug['chosen_source']}`")
                     st.write(f"**DB keyword intent:** `{debug['is_db_intent']}`")
                     st.write(f"**Library retriever loaded:** `{debug['library_available']}`")
@@ -465,16 +672,21 @@ if prompt := st.chat_input("Ask about library services or database recommendatio
                         st.write(f"- `{score:.3f}` — {name}")
             
             except Exception as e:
-                st.error(f"❌ Error: {e}")
+                st.error(f"Error: {e}")
                 logger.error(f"Error processing query: {e}", exc_info=True)
 
-# Footer
-st.divider()
-st.markdown(
-    """
-    <div style='text-align: center; color: gray; font-size: 0.9em;'>
-    Made with ❤️ using Streamlit | Powered by OpenAI
+# AUB Footer
+st.markdown("""
+<div class="aub-footer">
+    <strong>American University of Beirut</strong>
+    <div class="aub-footer-divider"></div>
+    <div class="aub-footer-links">
+        <a href="https://www.aub.edu.lb/libraries" target="_blank">AUB Libraries</a>
+        <a href="https://www.aub.edu.lb" target="_blank">AUB Homepage</a>
+        <a href="https://www.aub.edu.lb/pages/contact-us.aspx" target="_blank">Contact Us</a>
     </div>
-    """,
-    unsafe_allow_html=True
-)
+    <p style="margin-top: 0.8rem; font-size: 0.75rem; color: #999;">
+        Powered by OpenAI &middot; Built with Streamlit
+    </p>
+</div>
+""", unsafe_allow_html=True)
