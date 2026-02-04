@@ -30,13 +30,16 @@ class Config:
     FAQ_EMB_PATH = "faq_emb.npy"
     DB_TEXT_PATH = "db_text.parquet"
     DB_EMB_PATH = "db_emb.npy"
-    
+    LIBRARY_TEXT_PATH = "library_pages_text.parquet"
+    LIBRARY_EMB_PATH = "library_pages_emb.npy"
+
     EMBEDDING_MODEL = "text-embedding-3-small"
-    
+
     # Thresholds
     FAQ_HIGH_CONFIDENCE = 0.70  # Very confident FAQ match
     FAQ_MIN_CONFIDENCE = 0.60   # Minimum for FAQ answer
     DB_MIN_CONFIDENCE = 0.45    # Minimum for DB recommendation
+    LIBRARY_MIN_CONFIDENCE = 0.35  # Minimum for library page match
     BOTH_DELTA = 0.06           # Show both if FAQ barely above threshold
 
 class IntentType(Enum):
@@ -85,6 +88,20 @@ class EmbeddingUtils:
         s = re.sub(r"<[^>]+>", "", s)
         s = re.sub(r"\s+\n", "\n", s)
         return s.strip()
+
+    @staticmethod
+    def clean_library_content(s: str) -> str:
+        """Strip AUB navigation boilerplate from scraped page content."""
+        s = re.sub(
+            r"^.*?HOME\s*>\s*LIBRARIES[^a-z]*(?=[A-Z][a-z])",
+            "", s, count=1, flags=re.DOTALL
+        )
+        s = re.sub(
+            r"\s+SERVICES\s+DIRECTIONS & ACCESSIBILITY\s+FOR ALUMNI.*$",
+            "", s, flags=re.DOTALL
+        )
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
 
 class IntentDetector:
     """Detects user intent from query."""
@@ -152,13 +169,23 @@ class LibraryChatbot:
         self.faq_df = pd.read_parquet(Config.FAQ_TEXT_PATH)
         faq_emb = np.load(Config.FAQ_EMB_PATH)
         self.faq_retriever = Retriever(faq_emb, self.faq_df)
-        
+
         # Load database data
         self.db_df = pd.read_parquet(Config.DB_TEXT_PATH)
         db_emb = np.load(Config.DB_EMB_PATH)
         self.db_retriever = Retriever(db_emb, self.db_df)
-        
-        logger.info(f"Loaded {len(self.faq_df)} FAQs and {len(self.db_df)} databases")
+
+        # Load library pages data
+        try:
+            self.library_df = pd.read_parquet(Config.LIBRARY_TEXT_PATH)
+            library_emb = np.load(Config.LIBRARY_EMB_PATH)
+            self.library_retriever = Retriever(library_emb, self.library_df)
+            logger.info(f"Loaded {len(self.faq_df)} FAQs, {len(self.db_df)} databases, and {len(self.library_df)} library pages")
+        except FileNotFoundError:
+            logger.warning("Library pages not found. Run scrape_aub_library.py to create them.")
+            self.library_df = pd.DataFrame()
+            self.library_retriever = None
+            logger.info(f"Loaded {len(self.faq_df)} FAQs and {len(self.db_df)} databases")
     
     def embed_query(self, text: str) -> np.ndarray:
         """Generate embedding for query text."""
@@ -172,52 +199,59 @@ class LibraryChatbot:
     def answer(self, query: str) -> str:
         """
         Generate answer for user query.
-        
+
         Args:
             query: User's question
-            
+
         Returns:
             Formatted answer string
         """
         # Embed query
         query_vec = self.embed_query(query)
-        
+
         # Search both indices
         faq_results = self.faq_retriever.search(query_vec, k=5)
         db_results = self.db_retriever.search(query_vec, k=5)
-        
+
+        # Search library pages if available
+        library_results = []
+        if self.library_retriever is not None:
+            library_results = self.library_retriever.search(query_vec, k=3)
+
         best_faq_idx, best_faq_score = faq_results[0]
         best_db_idx, best_db_score = db_results[0]
-        
+
         # Detect intent
         intent = IntentDetector.detect(query)
-        
+
         # Determine response strategy
         show_faq = best_faq_score >= Config.FAQ_MIN_CONFIDENCE
         show_db = (
-            intent == IntentType.DATABASE or 
+            intent == IntentType.DATABASE or
             best_db_score >= Config.DB_MIN_CONFIDENCE
         )
-        
-        # High confidence FAQ - just answer
-        if show_faq and best_faq_score >= Config.FAQ_HIGH_CONFIDENCE and not show_db:
-            return self._format_faq_answer(best_faq_idx)
-        
-        # Both relevant - show both
-        if (show_faq and show_db and 
-            (best_faq_score - Config.FAQ_MIN_CONFIDENCE) < Config.BOTH_DELTA):
-            return self._format_both(best_faq_idx, db_results[:3])
-        
-        # Database request or DB score much higher
-        if show_db and (intent == IntentType.DATABASE or 
-                       best_db_score > best_faq_score):
+        show_library = False
+        if library_results:
+            best_library_idx, best_library_score = library_results[0]
+            show_library = best_library_score >= Config.LIBRARY_MIN_CONFIDENCE
+
+        # 1. Database intent → always use database recommendations
+        if show_db and intent == IntentType.DATABASE:
             return self._format_db_recommendations(db_results[:5])
-        
-        # FAQ answer
+
+        # 2. Scraped library pages → primary source for non-DB questions
+        if show_library:
+            return self._format_library_answer(query, library_results[:3])
+
+        # 3. FAQ → backup if scraped data didn't match
         if show_faq:
             return self._format_faq_answer(best_faq_idx)
-        
-        # Nothing confident enough
+
+        # 4. Database recommendations by semantic score (no keyword intent)
+        if show_db:
+            return self._format_db_recommendations(db_results[:5])
+
+        # 5. Nothing matched
         return self._format_unclear()
     
     def _format_faq_answer(self, idx: int) -> str:
@@ -246,9 +280,46 @@ class LibraryChatbot:
         """Format combined FAQ answer and database recommendations."""
         faq_part = self._format_faq_answer(faq_idx)
         db_part = self._format_db_recommendations(db_results)
-        
+
         return f"{faq_part}\n\n{db_part}"
-    
+
+    def _format_library_answer(self, query: str, results: List[Tuple[int, float]]) -> str:
+        """Use the LLM to synthesize a clean answer from retrieved library pages."""
+        context_parts = []
+        sources = []
+        for idx, score in results:
+            row = self.library_df.iloc[idx]
+            content = EmbeddingUtils.clean_library_content(row['content'])
+            context_parts.append(f"Page: {row['title']}\n{content}")
+            sources.append(f"{row['title']} — {row['url']}")
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful AUB library assistant. Answer the student's question "
+                        "using ONLY the provided context from the library website. "
+                        "Be concise and directly answer what was asked. "
+                        "If the context doesn't contain the answer, say so."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {query}"
+                }
+            ],
+            temperature=0.2,
+            max_tokens=500,
+        )
+
+        answer = resp.choices[0].message.content
+        source_list = "\n".join(f"  • {s}" for s in sources)
+        return f"📄 {answer}\n\nSources:\n{source_list}"
+
     def _format_unclear(self) -> str:
         """Format unclear intent message."""
         return (

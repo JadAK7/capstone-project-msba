@@ -37,13 +37,16 @@ class Config:
     FAQ_EMB_PATH = "faq_emb.npy"
     DB_TEXT_PATH = "db_text.parquet"
     DB_EMB_PATH = "db_emb.npy"
-    
+    LIBRARY_TEXT_PATH = "library_pages_text.parquet"
+    LIBRARY_EMB_PATH = "library_pages_emb.npy"
+
     EMBEDDING_MODEL = "text-embedding-3-small"
     EMBEDDING_BATCH_SIZE = 200
-    
+
     FAQ_HIGH_CONFIDENCE = 0.70
     FAQ_MIN_CONFIDENCE = 0.60
     DB_MIN_CONFIDENCE = 0.45
+    LIBRARY_MIN_CONFIDENCE = 0.35
     BOTH_DELTA = 0.06
 
 class IndexBuilder:
@@ -137,6 +140,23 @@ class EmbeddingUtils:
         s = re.sub(r"\s+\n", "\n", s)
         return s.strip()
 
+    @staticmethod
+    def clean_library_content(s: str) -> str:
+        """Strip AUB navigation boilerplate from scraped page content."""
+        # Strip toolbar + breadcrumbs up to the first title-case word
+        s = re.sub(
+            r"^.*?HOME\s*>\s*LIBRARIES[^a-z]*(?=[A-Z][a-z])",
+            "", s, count=1, flags=re.DOTALL
+        )
+        # Strip trailing sidebar navigation that appears after main content
+        s = re.sub(
+            r"\s+SERVICES\s+DIRECTIONS & ACCESSIBILITY\s+FOR ALUMNI.*$",
+            "", s, flags=re.DOTALL
+        )
+        # Clean up leftover whitespace
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
 class IntentDetector:
     """Detects user intent from query."""
     
@@ -211,6 +231,16 @@ class LibraryChatbot:
         self.db_df = pd.read_parquet(Config.DB_TEXT_PATH)
         db_emb = np.load(Config.DB_EMB_PATH)
         self.db_retriever = Retriever(db_emb, self.db_df)
+
+        # Load library pages data
+        try:
+            self.library_df = pd.read_parquet(Config.LIBRARY_TEXT_PATH)
+            library_emb = np.load(Config.LIBRARY_EMB_PATH)
+            self.library_retriever = Retriever(library_emb, self.library_df)
+        except FileNotFoundError:
+            logger.warning("Library pages not found. Run scrape_aub_library.py to create them.")
+            self.library_df = pd.DataFrame()
+            self.library_retriever = None
     
     def embed_query(self, text: str) -> np.ndarray:
         resp = self.client.embeddings.create(
@@ -220,40 +250,63 @@ class LibraryChatbot:
         vec = np.array(resp.data[0].embedding, dtype=np.float32)
         return EmbeddingUtils.sanitize_vec(vec)
     
-    def answer(self, query: str) -> Tuple[str, List[Tuple[int, float]], List[Tuple[int, float]]]:
-        """Generate answer and return results for display."""
+    def answer(self, query: str) -> Tuple[str, dict]:
+        """Generate answer and return results with debug info."""
         query_vec = self.embed_query(query)
-        
+
         faq_results = self.faq_retriever.search(query_vec, k=5)
         db_results = self.db_retriever.search(query_vec, k=5)
-        
+
+        # Search library pages if available
+        library_results = []
+        if self.library_retriever is not None:
+            library_results = self.library_retriever.search(query_vec, k=3)
+
         best_faq_idx, best_faq_score = faq_results[0]
         best_db_idx, best_db_score = db_results[0]
-        
+        best_library_score = library_results[0][1] if library_results else 0.0
+
         is_db_intent = IntentDetector.is_database_intent(query)
-        
+
         show_faq = best_faq_score >= Config.FAQ_MIN_CONFIDENCE
         show_db = is_db_intent or best_db_score >= Config.DB_MIN_CONFIDENCE
-        
-        if show_faq and best_faq_score >= Config.FAQ_HIGH_CONFIDENCE and not show_db:
-            answer = self._format_faq_answer(best_faq_idx)
-            return answer, faq_results[:1], []
-        
-        if (show_faq and show_db and 
-            (best_faq_score - Config.FAQ_MIN_CONFIDENCE) < Config.BOTH_DELTA):
-            answer = self._format_both(best_faq_idx, db_results[:3])
-            return answer, faq_results[:1], db_results[:3]
-        
-        if show_db and (is_db_intent or best_db_score > best_faq_score):
-            answer = self._format_db_recommendations(db_results[:5])
-            return answer, [], db_results[:5]
-        
+        show_library = bool(library_results) and best_library_score >= Config.LIBRARY_MIN_CONFIDENCE
+
+        debug = {
+            "faq_results": faq_results,
+            "db_results": db_results,
+            "library_results": library_results,
+            "is_db_intent": is_db_intent,
+            "show_faq": show_faq,
+            "show_db": show_db,
+            "show_library": show_library,
+            "library_available": self.library_retriever is not None,
+            "chosen_source": None,
+        }
+
+        # 1. Database intent → always use database recommendations
+        if show_db and is_db_intent:
+            debug["chosen_source"] = "database (keyword intent)"
+            return self._format_db_recommendations(db_results[:5]), debug
+
+        # 2. Scraped library pages → primary source for non-DB questions
+        if show_library:
+            debug["chosen_source"] = "library pages (scraped)"
+            return self._format_library_answer(query, library_results[:3]), debug
+
+        # 3. FAQ → backup if scraped data didn't match
         if show_faq:
-            answer = self._format_faq_answer(best_faq_idx)
-            return answer, faq_results[:1], []
-        
-        answer = self._format_unclear()
-        return answer, [], []
+            debug["chosen_source"] = "FAQ"
+            return self._format_faq_answer(best_faq_idx), debug
+
+        # 4. Database recommendations by semantic score (no keyword intent)
+        if show_db:
+            debug["chosen_source"] = "database (semantic)"
+            return self._format_db_recommendations(db_results[:5]), debug
+
+        # 5. Nothing matched
+        debug["chosen_source"] = "none (unclear)"
+        return self._format_unclear(), debug
     
     def _format_faq_answer(self, idx: int) -> str:
         answer = self.faq_df.loc[idx, "answer"]
@@ -278,7 +331,46 @@ class LibraryChatbot:
         faq_part = self._format_faq_answer(faq_idx)
         db_part = self._format_db_recommendations(db_results)
         return f"{faq_part}\n\n---\n\n{db_part}"
-    
+
+    def _format_library_answer(self, query: str, results: List[Tuple[int, float]]) -> str:
+        """Use the LLM to synthesize a clean answer from retrieved library pages."""
+        # Build context from retrieved pages
+        context_parts = []
+        sources = []
+        for idx, score in results:
+            row = self.library_df.iloc[idx]
+            content = EmbeddingUtils.clean_library_content(row['content'])
+            context_parts.append(f"Page: {row['title']}\n{content}")
+            sources.append(f"[{row['title']}]({row['url']})")
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        resp = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful AUB library assistant. Answer the student's question "
+                        "using ONLY the provided context from the library website. "
+                        "Be concise and directly answer what was asked. "
+                        "If the context doesn't contain the answer, say so. "
+                        "Use markdown formatting for readability."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {query}"
+                }
+            ],
+            temperature=0.2,
+            max_tokens=500,
+        )
+
+        answer = resp.choices[0].message.content
+        source_links = " | ".join(sources)
+        return f"📄 {answer}\n\n**Sources:** {source_links}"
+
     def _format_unclear(self) -> str:
         return (
             "🤔 **I'm not quite sure how to help.** You can:\n\n"
@@ -336,26 +428,41 @@ if prompt := st.chat_input("Ask about library services or database recommendatio
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
-                answer, faq_res, db_res = st.session_state.chatbot.answer(prompt)
+                answer, debug = st.session_state.chatbot.answer(prompt)
                 st.markdown(answer)
-                
+
                 # Store assistant message
                 st.session_state.messages.append({
                     'role': 'assistant',
                     'content': answer
                 })
-                
+
+                bot = st.session_state.chatbot
+
                 # Show debug info in expander
                 with st.expander("🔍 Debug Info"):
-                    if faq_res:
-                        st.write("**FAQ Results:**")
-                        for idx, score in faq_res:
-                            st.write(f"- {st.session_state.chatbot.faq_df.loc[idx, 'question'][:100]}... ({score:.3f})")
-                    
-                    if db_res:
-                        st.write("**Database Results:**")
-                        for idx, score in db_res:
-                            st.write(f"- {st.session_state.chatbot.db_df.loc[idx, 'name']} ({score:.3f})")
+                    st.write(f"**Chosen source:** `{debug['chosen_source']}`")
+                    st.write(f"**DB keyword intent:** `{debug['is_db_intent']}`")
+                    st.write(f"**Library retriever loaded:** `{debug['library_available']}`")
+                    st.write("---")
+
+                    st.write(f"**Top Library Page results** (threshold: {Config.LIBRARY_MIN_CONFIDENCE}, pass: `{debug['show_library']}`):")
+                    if debug["library_results"]:
+                        for idx, score in debug["library_results"]:
+                            title = bot.library_df.iloc[idx]['title'][:80]
+                            st.write(f"- `{score:.3f}` — {title}")
+                    else:
+                        st.write("- *(no library data loaded)*")
+
+                    st.write(f"**Top FAQ results** (threshold: {Config.FAQ_MIN_CONFIDENCE}, pass: `{debug['show_faq']}`):")
+                    for idx, score in debug["faq_results"][:3]:
+                        q = bot.faq_df.loc[idx, 'question'][:80]
+                        st.write(f"- `{score:.3f}` — {q}")
+
+                    st.write(f"**Top Database results** (threshold: {Config.DB_MIN_CONFIDENCE}, pass: `{debug['show_db']}`):")
+                    for idx, score in debug["db_results"][:3]:
+                        name = bot.db_df.loc[idx, 'name']
+                        st.write(f"- `{score:.3f}` — {name}")
             
             except Exception as e:
                 st.error(f"❌ Error: {e}")
