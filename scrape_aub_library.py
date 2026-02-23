@@ -2,19 +2,22 @@
 AUB Library Website Scraper
 Scrapes all pages from the AUB library website using Playwright (headless browser)
 so that JavaScript-rendered content (e.g. opening hours) is captured.
-Stores results in the vector database.
+Stores results in ChromaDB vector database.
 """
 
 import os
 import re
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from collections import deque
-import pandas as pd
-import numpy as np
-from openai import OpenAI
+import chromadb
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from tqdm import tqdm
 from playwright.sync_api import sync_playwright
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configuration
 START_URLS = [
@@ -22,16 +25,17 @@ START_URLS = [
     "https://www.aub.edu.lb/Libraries",
 ]
 ALLOWED_DOMAIN = "aub.edu.lb"
-ALLOWED_PATHS = ["/libraries", "/Libraries"]  # Both casings used on the site
-MAX_PAGES = 500  # Safety limit
-CRAWL_DELAY = 1  # Seconds between requests (be respectful)
-JS_WAIT_MS = 3000  # Time to wait for JS to render after page load
-BATCH_SIZE = 200  # For embedding generation
-OUTPUT_EMB_FILE = "library_pages_emb.npy"
-OUTPUT_TEXT_FILE = "library_pages_text.parquet"
-
-# Initialize OpenAI client
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+ALLOWED_PATHS = ["/libraries", "/Libraries"]
+MAX_PAGES = 500
+CRAWL_DELAY = 1
+JS_WAIT_MS = 3000
+PAGE_TIMEOUT = 60000  # 60 seconds for page navigation
+MAX_RETRIES = 3  # Retry failed page loads
+RETRY_DELAY = 2  # Seconds between retries
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+CHROMA_DIR = "./chroma_db"
+LIBRARY_COLLECTION = "library_pages"
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 class AUBLibraryScraper:
@@ -42,20 +46,18 @@ class AUBLibraryScraper:
         self.visited = set()
         self.to_visit = deque(start_urls)
         self.scraped_data = []
+        self.failed_pages = []  # Track failed pages
 
     def is_valid_url(self, url):
         """Check if URL should be crawled."""
         parsed = urlparse(url)
 
-        # Must be same domain
         if self.allowed_domain not in parsed.netloc:
             return False
 
-        # Must start with allowed path
         if not any(parsed.path.startswith(path) for path in self.allowed_paths):
             return False
 
-        # Skip files
         skip_extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
                           '.zip', '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3']
         if any(parsed.path.lower().endswith(ext) for ext in skip_extensions):
@@ -65,7 +67,6 @@ class AUBLibraryScraper:
 
     def extract_text(self, page):
         """Extract meaningful text from rendered page using Playwright."""
-        # Remove non-content elements before extracting text
         page.evaluate("""
             const selectors = [
                 'script', 'style', 'nav', 'footer', 'header',
@@ -82,7 +83,6 @@ class AUBLibraryScraper:
         """)
 
         text = page.evaluate("document.body.innerText")
-        # Clean up whitespace
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
 
@@ -100,34 +100,37 @@ class AUBLibraryScraper:
         return links
 
     def scrape_page(self, page, url):
-        """Scrape a single page using Playwright."""
-        try:
-            page.goto(url, timeout=30000, wait_until="networkidle")
-            # Extra wait for any late JS rendering (e.g. hours widgets)
-            page.wait_for_timeout(JS_WAIT_MS)
+        """Scrape a single page using Playwright with retry logic."""
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Use domcontentloaded instead of networkidle to avoid SharePoint analytics timeout
+                page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
+                page.wait_for_timeout(JS_WAIT_MS)
 
-            # Extract title
-            title = page.title() or url
+                title = page.title() or url
+                links = self.extract_links(page, url)
+                text = self.extract_text(page)
 
-            # Extract links before modifying the DOM
-            links = self.extract_links(page, url)
+                if len(text) > 100:
+                    self.scraped_data.append({
+                        'url': url,
+                        'title': title,
+                        'content': text[:5000]
+                    })
 
-            # Extract main content (this modifies the DOM by removing elements)
-            text = self.extract_text(page)
+                return links
 
-            # Only store if we got meaningful content
-            if len(text) > 100:
-                self.scraped_data.append({
-                    'url': url,
-                    'title': title,
-                    'content': text[:5000]
-                })
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    print(f"Error scraping {url} (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
+                    print(f"Retrying in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print(f"Error scraping {url} after {MAX_RETRIES} attempts: {str(e)}")
+                    self.failed_pages.append({'url': url, 'error': str(e)})
+                    return []
 
-            return links
-
-        except Exception as e:
-            print(f"Error scraping {url}: {str(e)}")
-            return []
+        return []
 
     def crawl(self, max_pages=MAX_PAGES):
         """Crawl the website using BFS with a headless browser."""
@@ -138,7 +141,9 @@ class AUBLibraryScraper:
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            # Set realistic user-agent to avoid bot detection
+            context = browser.new_context(user_agent=USER_AGENT)
+            page = context.new_page()
 
             while self.to_visit and len(self.visited) < max_pages:
                 url = self.to_visit.popleft()
@@ -150,15 +155,12 @@ class AUBLibraryScraper:
                 pbar.update(1)
                 pbar.set_postfix({'current': url[:50] + '...' if len(url) > 50 else url})
 
-                # Scrape the page
                 new_links = self.scrape_page(page, url)
 
-                # Add new links to queue
                 for link in new_links:
                     if link not in self.visited:
                         self.to_visit.append(link)
 
-                # Be respectful - delay between requests
                 time.sleep(CRAWL_DELAY)
 
             browser.close()
@@ -168,78 +170,69 @@ class AUBLibraryScraper:
         print(f"Pages visited: {len(self.visited)}")
         print(f"Pages with content: {len(self.scraped_data)}")
 
+        # Print failure summary
+        if self.failed_pages:
+            print(f"\n⚠️  Failed pages: {len(self.failed_pages)}")
+            print("\nFailed URLs:")
+            for failure in self.failed_pages[:10]:  # Show first 10 failures
+                print(f"  - {failure['url']}")
+                print(f"    Error: {failure['error']}")
+            if len(self.failed_pages) > 10:
+                print(f"  ... and {len(self.failed_pages) - 10} more")
+        else:
+            print("\n✅ No failed pages!")
+
         return self.scraped_data
 
 
-def sanitize_matrix(matrix):
-    """Sanitize embedding matrix by handling NaN/Inf and normalizing."""
-    matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
-    matrix = np.clip(matrix, -10, 10)
-
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1, norms)
-    matrix = matrix / norms
-
-    return matrix
-
-
-def embed_batch(texts, batch_size=BATCH_SIZE):
-    """Generate embeddings for a list of texts using OpenAI API."""
-    embeddings = []
-
-    print(f"Generating embeddings for {len(texts)} texts...")
-
-    for i in tqdm(range(0, len(texts), batch_size), desc="Embedding batches"):
-        batch = texts[i:i + batch_size]
-
-        try:
-            response = client.embeddings.create(
-                model="text-embedding-3-small",
-                input=batch
-            )
-
-            batch_embeddings = [item.embedding for item in response.data]
-            embeddings.extend(batch_embeddings)
-
-        except Exception as e:
-            print(f"Error generating embeddings for batch {i//batch_size}: {str(e)}")
-            embeddings.extend([[0.0] * 1536] * len(batch))
-
-    return np.array(embeddings, dtype=np.float32)
-
-
 def build_library_index(scraped_data):
-    """Build vector index from scraped library pages."""
+    """Build ChromaDB collection from scraped library pages."""
     print("\n" + "="*60)
-    print("Building Library Pages Index")
+    print("Building Library Pages Collection in ChromaDB")
     print("="*60)
 
-    df = pd.DataFrame(scraped_data)
-    print(f"\nTotal pages scraped: {len(df)}")
+    print(f"\nTotal pages scraped: {len(scraped_data)}")
 
-    texts_to_embed = []
-    for _, row in df.iterrows():
-        combined = f"{row['title']}\n\n{row['content']}"
-        texts_to_embed.append(combined)
+    embedding_fn = OpenAIEmbeddingFunction(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        model_name=EMBEDDING_MODEL,
+    )
+    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
 
-    embeddings = embed_batch(texts_to_embed)
-    embeddings = sanitize_matrix(embeddings)
+    # Delete existing collection and recreate
+    try:
+        chroma_client.delete_collection(LIBRARY_COLLECTION)
+    except (ValueError, Exception):
+        pass
 
-    print(f"\nEmbeddings shape: {embeddings.shape}")
-    print(f"Embeddings dtype: {embeddings.dtype}")
-    print(f"Embeddings range: [{embeddings.min():.4f}, {embeddings.max():.4f}]")
+    collection = chroma_client.create_collection(
+        name=LIBRARY_COLLECTION,
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"},
+    )
 
-    np.save(OUTPUT_EMB_FILE, embeddings)
-    print(f"\n✓ Saved embeddings to {OUTPUT_EMB_FILE}")
+    # Upsert in batches
+    batch_size = 50
+    for i in tqdm(range(0, len(scraped_data), batch_size), desc="Upserting to ChromaDB"):
+        batch = scraped_data[i:i + batch_size]
 
-    df.to_parquet(OUTPUT_TEXT_FILE, index=False)
-    print(f"✓ Saved text data to {OUTPUT_TEXT_FILE}")
+        ids = [f"page_{j}" for j in range(i, i + len(batch))]
+        documents = [f"{item['title']}\n\n{item['content']}" for item in batch]
+        metadatas = [
+            {"url": item["url"], "title": item["title"], "content": item["content"]}
+            for item in batch
+        ]
+
+        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
+
+    count = collection.count()
+    print(f"\nLibrary pages collection saved: {count} entries")
 
     print("\n" + "="*60)
-    print("Index building complete!")
+    print("Collection building complete!")
     print("="*60)
 
-    return embeddings, df
+    return collection
 
 
 def main():
@@ -266,21 +259,19 @@ def main():
         print("\n⚠️  No data scraped! Please check the website URL and configuration.")
         return
 
-    embeddings, df = build_library_index(scraped_data)
+    collection = build_library_index(scraped_data)
 
     print("\n✅ All done!")
-    print(f"\nTo use these embeddings in your RAG system:")
-    print(f"1. The embeddings are saved in: {OUTPUT_EMB_FILE}")
-    print(f"2. The text data is saved in: {OUTPUT_TEXT_FILE}")
-    print(f"3. Update your chat.py or app.py to load these files alongside FAQ and Database indices")
+    print(f"\nLibrary pages are stored in ChromaDB at: {CHROMA_DIR}")
+    print(f"Collection '{LIBRARY_COLLECTION}' has {collection.count()} entries")
 
     print("\n" + "="*60)
     print("Sample of scraped pages:")
     print("="*60)
-    for i, row in df.head(5).iterrows():
-        print(f"\n{i+1}. {row['title']}")
-        print(f"   URL: {row['url']}")
-        print(f"   Content preview: {row['content'][:100]}...")
+    for i, item in enumerate(scraped_data[:5]):
+        print(f"\n{i+1}. {item['title']}")
+        print(f"   URL: {item['url']}")
+        print(f"   Content preview: {item['content'][:100]}...")
 
 
 if __name__ == "__main__":
