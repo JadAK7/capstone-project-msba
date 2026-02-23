@@ -1,21 +1,19 @@
 """
 build_index.py
-Builds embedding indices for FAQ and Database recommendation system.
-Improvements:
-- Better error handling and logging
-- Configuration management
-- Progress tracking
-- Data validation
-- Modular design
+Builds ChromaDB embedding collections for FAQ and Database recommendation system.
+Uses ChromaDB's built-in OpenAI embedding function for embedding generation.
 """
 
+import os
 import pandas as pd
-import numpy as np
-from openai import OpenAI
-from pathlib import Path
+import chromadb
+from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from typing import List, Tuple
 import logging
-from tqdm import tqdm
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -28,196 +26,159 @@ logger = logging.getLogger(__name__)
 class Config:
     FAQ_PATH = "library_faq_clean.csv"
     DB_PATH = "Databases description.csv"
-    
-    FAQ_TEXT_OUTPUT = "faq_text.parquet"
-    FAQ_EMB_OUTPUT = "faq_emb.npy"
-    DB_TEXT_OUTPUT = "db_text.parquet"
-    DB_EMB_OUTPUT = "db_emb.npy"
-    
+    CHROMA_DIR = "./chroma_db"
     EMBEDDING_MODEL = "text-embedding-3-small"
-    EMBEDDING_BATCH_SIZE = 200
-    EMBEDDING_DIM = 1536  # for text-embedding-3-small
 
-client = OpenAI()
+    FAQ_COLLECTION = "faq"
+    DB_COLLECTION = "databases"
 
-def sanitize_matrix(m: np.ndarray) -> np.ndarray:
-    """
-    Normalize and sanitize embedding matrix for safe similarity computation.
-    
-    Args:
-        m: Input embedding matrix
-        
-    Returns:
-        Sanitized and L2-normalized matrix
-    """
-    m = np.asarray(m, dtype=np.float32)
-    m = np.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0)
-    m = np.clip(m, -10.0, 10.0)
-    
-    norms = np.linalg.norm(m, axis=1, keepdims=True)
-    m = m / np.clip(norms, 1e-12, None)
-    
-    return np.ascontiguousarray(m)
 
-def embed_batch(
-    text_list: List[str],
-    model: str = Config.EMBEDDING_MODEL,
-    batch_size: int = Config.EMBEDDING_BATCH_SIZE
-) -> np.ndarray:
-    """
-    Generate embeddings for a list of texts with batching and progress tracking.
-    
-    Args:
-        text_list: List of text strings to embed
-        model: OpenAI embedding model name
-        batch_size: Number of texts per API call
-        
-    Returns:
-        Sanitized embedding matrix
-    """
-    embeddings = []
-    
-    with tqdm(total=len(text_list), desc="Generating embeddings") as pbar:
-        for i in range(0, len(text_list), batch_size):
-            batch = text_list[i:i + batch_size]
-            
-            try:
-                resp = client.embeddings.create(model=model, input=batch)
-                batch_embeddings = [d.embedding for d in resp.data]
-                embeddings.extend(batch_embeddings)
-                pbar.update(len(batch))
-                
-            except Exception as e:
-                logger.error(f"Error embedding batch {i}-{i+len(batch)}: {e}")
-                raise
-    
-    arr = np.array(embeddings, dtype=np.float32)
-    return sanitize_matrix(arr)
+def get_chroma_client():
+    """Create a persistent ChromaDB client."""
+    return chromadb.PersistentClient(path=Config.CHROMA_DIR)
+
+
+def get_embedding_function():
+    """Create OpenAI embedding function for ChromaDB."""
+    return OpenAIEmbeddingFunction(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        model_name=Config.EMBEDDING_MODEL,
+    )
+
 
 def validate_dataframe(
     df: pd.DataFrame,
     required_cols: List[str],
     name: str
 ) -> Tuple[pd.DataFrame, int]:
-    """
-    Validate and clean dataframe.
-    
-    Args:
-        df: Input dataframe
-        required_cols: List of required column names
-        name: Name of dataset for logging
-        
-    Returns:
-        Tuple of (cleaned_df, num_dropped_rows)
-    """
+    """Validate and clean dataframe."""
     initial_len = len(df)
-    
-    # Check required columns exist
+
     missing_cols = set(required_cols) - set(df.columns)
     if missing_cols:
         raise ValueError(f"{name}: Missing columns {missing_cols}")
-    
-    # Clean and validate
+
     for col in required_cols:
         df[col] = df[col].fillna("").astype(str).str.strip()
-    
-    # Remove rows with empty required fields
+
     mask = df[required_cols].apply(lambda x: x != "").all(axis=1)
     df_clean = df[mask].reset_index(drop=True)
-    
+
     dropped = initial_len - len(df_clean)
     if dropped > 0:
         logger.warning(f"{name}: Dropped {dropped} rows with empty fields")
-    
+
     return df_clean, dropped
 
-def build_faq_index() -> None:
-    """Build and save FAQ embeddings index."""
-    logger.info("Building FAQ index...")
-    
-    # Load and validate
+
+def build_faq_index(client, embedding_fn) -> None:
+    """Build and save FAQ collection in ChromaDB."""
+    logger.info("Building FAQ collection...")
+
     faq = pd.read_csv(Config.FAQ_PATH)
     faq, dropped = validate_dataframe(faq, ["question", "answer"], "FAQ")
-    
-    logger.info(f"Processing {len(faq)} FAQ entries")
-    
-    # Generate embeddings
-    faq_emb = embed_batch(faq["question"].tolist())
-    
-    # Validate embedding dimensions
-    expected_dim = Config.EMBEDDING_DIM
-    if faq_emb.shape[1] != expected_dim:
-        logger.warning(
-            f"Unexpected embedding dimension: {faq_emb.shape[1]} "
-            f"(expected {expected_dim})"
-        )
-    
-    # Save
-    faq[["question", "answer"]].to_parquet(Config.FAQ_TEXT_OUTPUT, index=False)
-    np.save(Config.FAQ_EMB_OUTPUT, faq_emb)
-    
-    logger.info(f"✓ FAQ index saved: {len(faq)} entries, shape {faq_emb.shape}")
 
-def build_database_index() -> None:
-    """Build and save database recommendation embeddings index."""
-    logger.info("Building Database index...")
-    
-    # Load and validate
+    logger.info(f"Processing {len(faq)} FAQ entries")
+
+    # Delete existing collection and recreate
+    try:
+        client.delete_collection(Config.FAQ_COLLECTION)
+    except ValueError:
+        pass
+
+    collection = client.create_collection(
+        name=Config.FAQ_COLLECTION,
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    # Upsert in batches (ChromaDB has a batch limit)
+    batch_size = 100
+    for i in range(0, len(faq), batch_size):
+        batch = faq.iloc[i:i + batch_size]
+        collection.upsert(
+            ids=[f"faq_{j}" for j in range(i, i + len(batch))],
+            documents=batch["question"].tolist(),
+            metadatas=[
+                {"question": row["question"], "answer": row["answer"]}
+                for _, row in batch.iterrows()
+            ],
+        )
+        logger.info(f"  Upserted FAQ batch {i}-{i + len(batch)}")
+
+    logger.info(f"FAQ collection saved: {collection.count()} entries")
+
+
+def build_database_index(client, embedding_fn) -> None:
+    """Build and save database recommendation collection in ChromaDB."""
+    logger.info("Building Database collection...")
+
     db = pd.read_csv(Config.DB_PATH)
     db, dropped = validate_dataframe(db, ["name", "description"], "Database")
-    
-    logger.info(f"Processing {len(db)} database entries")
-    
-    # Create combined text for embedding
-    db_text = (db["name"] + ". " + db["description"]).tolist()
-    
-    # Generate embeddings
-    db_emb = embed_batch(db_text)
-    
-    # Validate embedding dimensions
-    expected_dim = Config.EMBEDDING_DIM
-    if db_emb.shape[1] != expected_dim:
-        logger.warning(
-            f"Unexpected embedding dimension: {db_emb.shape[1]} "
-            f"(expected {expected_dim})"
-        )
-    
-    # Save
-    db[["name", "description"]].to_parquet(Config.DB_TEXT_OUTPUT, index=False)
-    np.save(Config.DB_EMB_OUTPUT, db_emb)
-    
-    logger.info(f"✓ Database index saved: {len(db)} entries, shape {db_emb.shape}")
 
-def verify_indices() -> None:
-    """Verify that all index files were created successfully."""
-    required_files = [
-        Config.FAQ_TEXT_OUTPUT,
-        Config.FAQ_EMB_OUTPUT,
-        Config.DB_TEXT_OUTPUT,
-        Config.DB_EMB_OUTPUT
-    ]
-    
-    missing = [f for f in required_files if not Path(f).exists()]
-    
-    if missing:
-        raise FileNotFoundError(f"Missing output files: {missing}")
-    
-    logger.info("✓ All index files verified")
+    logger.info(f"Processing {len(db)} database entries")
+
+    try:
+        client.delete_collection(Config.DB_COLLECTION)
+    except ValueError:
+        pass
+
+    collection = client.create_collection(
+        name=Config.DB_COLLECTION,
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    batch_size = 100
+    for i in range(0, len(db), batch_size):
+        batch = db.iloc[i:i + batch_size]
+        documents = (batch["name"] + ". " + batch["description"]).tolist()
+        collection.upsert(
+            ids=[f"db_{j}" for j in range(i, i + len(batch))],
+            documents=documents,
+            metadatas=[
+                {"name": row["name"], "description": row["description"]}
+                for _, row in batch.iterrows()
+            ],
+        )
+        logger.info(f"  Upserted Database batch {i}-{i + len(batch)}")
+
+    logger.info(f"Database collection saved: {collection.count()} entries")
+
+
+def verify_indices(client) -> None:
+    """Verify that all ChromaDB collections were created successfully."""
+    for name in [Config.FAQ_COLLECTION, Config.DB_COLLECTION]:
+        try:
+            col = client.get_collection(name)
+            count = col.count()
+            if count == 0:
+                raise ValueError(f"Collection '{name}' is empty")
+            logger.info(f"  Collection '{name}': {count} entries")
+        except ValueError:
+            raise FileNotFoundError(f"Collection '{name}' not found")
+
+    logger.info("All collections verified")
+
 
 def main():
     """Main entry point for building indices."""
     try:
         logger.info("Starting index build process...")
-        
-        build_faq_index()
-        build_database_index()
-        verify_indices()
-        
-        logger.info("✅ Index build completed successfully!")
-        
+
+        chroma_client = get_chroma_client()
+        embedding_fn = get_embedding_function()
+
+        build_faq_index(chroma_client, embedding_fn)
+        build_database_index(chroma_client, embedding_fn)
+        verify_indices(chroma_client)
+
+        logger.info("Index build completed successfully!")
+
     except Exception as e:
-        logger.error(f"❌ Index build failed: {e}")
+        logger.error(f"Index build failed: {e}")
         raise
+
 
 if __name__ == "__main__":
     main()
