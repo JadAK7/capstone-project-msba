@@ -2,21 +2,24 @@
 chatbot.py
 Core chatbot logic for the FastAPI backend.
 Supports Arabic and English (bilingual).
+Uses PostgreSQL + pgvector for vector similarity search.
 """
 
 import os
 import re
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+import numpy as np
 from openai import OpenAI
 from typing import List, Tuple, Optional
 import logging
+
+from .cache import ResponseCache
+from .database import get_connection
+from .embeddings import embed_text
 
 logger = logging.getLogger(__name__)
 
 
 class Config:
-    CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_db")
     EMBEDDING_MODEL = "text-embedding-3-small"
 
     FAQ_COLLECTION = "faq"
@@ -28,6 +31,16 @@ class Config:
     DB_MIN_CONFIDENCE = 0.45
     LIBRARY_MIN_CONFIDENCE = 0.35
     BOTH_DELTA = 0.06
+
+    # Cross-lingual penalty: Arabic queries against English-indexed data
+    # typically score 10-20% lower in cosine similarity. This offset is
+    # subtracted from thresholds when the query language differs from the
+    # storage language (English) to avoid incorrectly classifying relevant
+    # matches as "unclear".
+    CROSS_LINGUAL_THRESHOLD_OFFSET = 0.10
+
+    # Conversation history
+    MAX_HISTORY_TURNS = 5  # Number of recent turns (user+assistant pairs) to include in LLM context
 
     # Supported languages
     LANG_EN = "en"
@@ -92,8 +105,11 @@ class EmbeddingUtils:
         return s
 
 
-def _chroma_distance_to_similarity(distances: List[float]) -> List[float]:
-    """Convert ChromaDB cosine distances to similarity scores."""
+def _pgvector_distance_to_similarity(distances: List[float]) -> List[float]:
+    """Convert pgvector cosine distances to similarity scores.
+
+    pgvector's <=> operator returns cosine distance (1 - similarity).
+    """
     return [1.0 - d for d in distances]
 
 
@@ -110,35 +126,33 @@ class IntentDetector:
     )
 
     # Arabic database keywords
-    # Covers: database, data, search, find, source, best database,
-    # recommend, articles, research papers, where to find, scientific journals
     DB_KEYWORDS_AR = re.compile(
         r"("
-        r"\u0642\u0627\u0639\u062F\u0629\s*\u0628\u064A\u0627\u0646\u0627\u062A|"  # قاعدة بيانات
-        r"\u0642\u0648\u0627\u0639\u062F\s*\u0628\u064A\u0627\u0646\u0627\u062A|"  # قواعد بيانات
-        r"\u0642\u0627\u0639\u062F\u0629\s*\u0645\u0639\u0644\u0648\u0645\u0627\u062A|"  # قاعدة معلومات
-        r"\u0623\u064A\u0646\s*\u0623\u0628\u062D\u062B|"  # أين أبحث
-        r"\u0623\u064A\u0646\s*\u0623\u062C\u062F|"  # أين أجد
-        r"\u0645\u0635\u062F\u0631|"  # مصدر
-        r"\u0645\u0635\u0627\u062F\u0631|"  # مصادر
-        r"\u0623\u0641\u0636\u0644\s*\u0642\u0627\u0639\u062F\u0629|"  # أفضل قاعدة
-        r"\u0623\u0648\u0635\u064A|"  # أوصي (recommend)
-        r"\u062A\u0648\u0635\u064A\u0629|"  # توصية (recommendation)
-        r"\u0623\u0646\u0635\u062D|"  # أنصح (advise/recommend)
-        r"\u0627\u0628\u062D\u062B|"  # ابحث (search)
-        r"\u0628\u062D\u062B|"  # بحث (search/research)
-        r"\u0645\u0642\u0627\u0644\u0627\u062A|"  # مقالات (articles)
-        r"\u0645\u0642\u0627\u0644\u0629|"  # مقالة (article)
-        r"\u0623\u0648\u0631\u0627\u0642\s*\u0628\u062D\u062B\u064A\u0629|"  # أوراق بحثية (research papers)
-        r"\u0648\u0631\u0642\u0629\s*\u0628\u062D\u062B\u064A\u0629|"  # ورقة بحثية (research paper)
-        r"\u0645\u062C\u0644\u0627\u062A\s*\u0639\u0644\u0645\u064A\u0629|"  # مجلات علمية (scientific journals)
-        r"\u0645\u062C\u0644\u0629\s*\u0639\u0644\u0645\u064A\u0629|"  # مجلة علمية (scientific journal)
-        r"\u062F\u0648\u0631\u064A\u0627\u062A|"  # دوريات (periodicals/journals)
-        r"\u0631\u0633\u0627\u0644\u0629|"  # رسالة (thesis)
-        r"\u0631\u0633\u0627\u0626\u0644|"  # رسائل (theses)
-        r"\u0623\u0637\u0631\u0648\u062D\u0629|"  # أطروحة (dissertation)
-        r"\u0645\u0624\u062A\u0645\u0631|"  # مؤتمر (conference)
-        r"\u0645\u0646\u0634\u0648\u0631\u0627\u062A"  # منشورات (publications)
+        r"\u0642\u0627\u0639\u062F\u0629\s*\u0628\u064A\u0627\u0646\u0627\u062A|"
+        r"\u0642\u0648\u0627\u0639\u062F\s*\u0628\u064A\u0627\u0646\u0627\u062A|"
+        r"\u0642\u0627\u0639\u062F\u0629\s*\u0645\u0639\u0644\u0648\u0645\u0627\u062A|"
+        r"\u0623\u064A\u0646\s*\u0623\u0628\u062D\u062B|"
+        r"\u0623\u064A\u0646\s*\u0623\u062C\u062F|"
+        r"\u0645\u0635\u062F\u0631|"
+        r"\u0645\u0635\u0627\u062F\u0631|"
+        r"\u0623\u0641\u0636\u0644\s*\u0642\u0627\u0639\u062F\u0629|"
+        r"\u0623\u0648\u0635\u064A|"
+        r"\u062A\u0648\u0635\u064A\u0629|"
+        r"\u0623\u0646\u0635\u062D|"
+        r"\u0627\u0628\u062D\u062B|"
+        r"\u0628\u062D\u062B|"
+        r"\u0645\u0642\u0627\u0644\u0627\u062A|"
+        r"\u0645\u0642\u0627\u0644\u0629|"
+        r"\u0623\u0648\u0631\u0627\u0642\s*\u0628\u062D\u062B\u064A\u0629|"
+        r"\u0648\u0631\u0642\u0629\s*\u0628\u062D\u062B\u064A\u0629|"
+        r"\u0645\u062C\u0644\u0627\u062A\s*\u0639\u0644\u0645\u064A\u0629|"
+        r"\u0645\u062C\u0644\u0629\s*\u0639\u0644\u0645\u064A\u0629|"
+        r"\u062F\u0648\u0631\u064A\u0627\u062A|"
+        r"\u0631\u0633\u0627\u0644\u0629|"
+        r"\u0631\u0633\u0627\u0626\u0644|"
+        r"\u0623\u0637\u0631\u0648\u062D\u0629|"
+        r"\u0645\u0624\u062A\u0645\u0631|"
+        r"\u0645\u0646\u0634\u0648\u0631\u0627\u062A"
         r")",
         re.IGNORECASE
     )
@@ -153,15 +167,15 @@ class IntentDetector:
     # Arabic research topic keywords
     RESEARCH_TOPICS_AR = re.compile(
         r"("
-        r"\u0645\u0642\u0627\u0644|"  # مقال (article)
-        r"\u0628\u062D\u062B|"  # بحث (research)
-        r"\u0623\u0628\u062D\u0627\u062B|"  # أبحاث (researches)
-        r"\u062F\u0631\u0627\u0633\u0629|"  # دراسة (study)
-        r"\u062F\u0631\u0627\u0633\u0627\u062A|"  # دراسات (studies)
-        r"\u0645\u0631\u0627\u062C\u0639|"  # مراجع (references)
-        r"\u0645\u0631\u062C\u0639|"  # مرجع (reference)
-        r"\u0639\u0644\u0645\u064A|"  # علمي (scientific)
-        r"\u0623\u0643\u0627\u062F\u064A\u0645\u064A"  # أكاديمي (academic)
+        r"\u0645\u0642\u0627\u0644|"
+        r"\u0628\u062D\u062B|"
+        r"\u0623\u0628\u062D\u0627\u062B|"
+        r"\u062F\u0631\u0627\u0633\u0629|"
+        r"\u062F\u0631\u0627\u0633\u0627\u062A|"
+        r"\u0645\u0631\u0627\u062C\u0639|"
+        r"\u0645\u0631\u062C\u0639|"
+        r"\u0639\u0644\u0645\u064A|"
+        r"\u0623\u0643\u0627\u062F\u064A\u0645\u064A"
         r")",
         re.IGNORECASE
     )
@@ -186,9 +200,11 @@ class IntentDetector:
 _SYSTEM_PROMPTS = {
     Config.LANG_EN: (
         "You are a helpful AUB library assistant. Answer the student's question "
-        "using ONLY the provided context from the library website. "
+        "using the provided context from the library website. "
+        "If conversation history is present, use it to understand follow-up "
+        "questions (e.g. if the student asks 'how' after asking about borrowing, "
+        "they mean 'how to borrow'). "
         "Be concise and directly answer what was asked. "
-        "If the context doesn't contain the answer, say so. "
         "Use markdown formatting for readability."
     ),
     Config.LANG_AR: (
@@ -197,11 +213,12 @@ _SYSTEM_PROMPTS = {
         "\u0641\u064A \u0628\u064A\u0631\u0648\u062A. "
         "\u0623\u062C\u0628 \u0639\u0644\u0649 \u0633\u0624\u0627\u0644 \u0627\u0644\u0637\u0627\u0644\u0628 "
         "\u0628\u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0627\u0644\u0633\u064A\u0627\u0642 \u0627\u0644\u0645\u0642\u062F\u0645 "
-        "\u0641\u0642\u0637 \u0645\u0646 \u0645\u0648\u0642\u0639 \u0627\u0644\u0645\u0643\u062A\u0628\u0629. "
+        "\u0645\u0646 \u0645\u0648\u0642\u0639 \u0627\u0644\u0645\u0643\u062A\u0628\u0629. "
+        "\u0625\u0630\u0627 \u0643\u0627\u0646 \u0647\u0646\u0627\u0643 \u0633\u062C\u0644 \u0645\u062D\u0627\u062F\u062B\u0629\u060C "
+        "\u0627\u0633\u062A\u062E\u062F\u0645\u0647 \u0644\u0641\u0647\u0645 \u0623\u0633\u0626\u0644\u0629 "
+        "\u0627\u0644\u0645\u062A\u0627\u0628\u0639\u0629. "
         "\u0643\u0646 \u0645\u0648\u062C\u0632\u0627\u064B \u0648\u0623\u062C\u0628 \u0645\u0628\u0627\u0634\u0631\u0629 "
         "\u0639\u0644\u0649 \u0645\u0627 \u062A\u0645 \u0633\u0624\u0627\u0644\u0647. "
-        "\u0625\u0630\u0627 \u0644\u0645 \u064A\u062D\u062A\u0648\u0650 \u0627\u0644\u0633\u064A\u0627\u0642 "
-        "\u0639\u0644\u0649 \u0627\u0644\u0625\u062C\u0627\u0628\u0629\u060C \u0642\u0644 \u0630\u0644\u0643. "
         "\u0627\u0633\u062A\u062E\u062F\u0645 \u062A\u0646\u0633\u064A\u0642 Markdown \u0644\u0633\u0647\u0648\u0644\u0629 "
         "\u0627\u0644\u0642\u0631\u0627\u0621\u0629. "
         "\u0623\u062C\u0628 \u0628\u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629."
@@ -237,7 +254,7 @@ _RESPONSE_TEMPLATES = {
 
 
 class LibraryChatbot:
-    """Main chatbot class using ChromaDB for retrieval.
+    """Main chatbot class using PostgreSQL + pgvector for retrieval.
 
     Supports bilingual (Arabic/English) operation. Language is resolved
     in this priority order:
@@ -245,77 +262,215 @@ class LibraryChatbot:
         2. Auto-detection from the query text via LanguageDetector
     """
 
+    # Minimum cosine similarity for feedback to be considered relevant
+    FEEDBACK_MIN_SIMILARITY = 0.85
+
     def __init__(self, api_key: str):
         self.client = OpenAI(api_key=api_key)
+        self._cache = ResponseCache(max_size=256, ttl_seconds=3600)
 
-        embedding_fn = OpenAIEmbeddingFunction(
-            api_key=api_key,
-            model_name=Config.EMBEDDING_MODEL,
-        )
-        chroma_client = chromadb.PersistentClient(path=Config.CHROMA_DIR)
-
-        self.faq_collection = chroma_client.get_collection(
-            name=Config.FAQ_COLLECTION,
-            embedding_function=embedding_fn,
-        )
-        self.db_collection = chroma_client.get_collection(
-            name=Config.DB_COLLECTION,
-            embedding_function=embedding_fn,
-        )
-
+        # Verify tables exist and have data
+        self.library_available = False
         try:
-            self.library_collection = chroma_client.get_collection(
-                name=Config.LIBRARY_COLLECTION,
-                embedding_function=embedding_fn,
-            )
-            if self.library_collection.count() == 0:
-                self.library_collection = None
-        except (ValueError, Exception):
-            logger.warning("Library pages collection not found.")
-            self.library_collection = None
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM library_pages")
+                    if cur.fetchone()[0] > 0:
+                        self.library_available = True
+        except Exception:
+            logger.warning("Library pages table not found or empty.")
+
+    def _query_table(
+        self,
+        table: str,
+        query: str,
+        n_results: int,
+        metadata_cols: List[str],
+    ) -> dict:
+        """Query a pgvector table for nearest neighbors.
+
+        Returns a dict with the following structure:
+            {
+                "ids": [[id1, id2, ...]],
+                "distances": [[d1, d2, ...]],
+                "metadatas": [[{col: val, ...}, ...]],
+            }
+        """
+        query_embedding = embed_text(query)
+        query_vec = np.array(query_embedding)
+
+        cols = ", ".join(metadata_cols)
+        sql = (
+            f"SELECT id, embedding <=> %s AS distance, {cols} "
+            f"FROM {table} "
+            f"ORDER BY embedding <=> %s "
+            f"LIMIT %s"
+        )
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (query_vec, query_vec, n_results))
+                rows = cur.fetchall()
+
+        ids = []
+        distances = []
+        metadatas = []
+        for row in rows:
+            ids.append(row[0])
+            distances.append(float(row[1]))
+            meta = {col: row[2 + i] for i, col in enumerate(metadata_cols)}
+            metadatas.append(meta)
+
+        return {
+            "ids": [ids],
+            "distances": [distances],
+            "metadatas": [metadatas],
+        }
+
+    def get_collection_count(self, table: str) -> int:
+        """Return the number of rows in a table."""
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                return cur.fetchone()[0]
+
+    def clear_cache(self) -> None:
+        """Invalidate all cached responses (e.g. after reindex)."""
+        self._cache.clear()
+
+    def cache_stats(self) -> dict:
+        """Return cache hit/miss statistics."""
+        return self._cache.stats()
+
+    def _lookup_feedback_correction(self, query: str) -> Optional[str]:
+        """Check if a similar query has been corrected by an admin.
+
+        Searches the chat_feedback table for negative feedback entries with
+        corrected answers, using pgvector similarity on the query embedding.
+        Returns the corrected answer if a close match is found (>= 0.85
+        cosine similarity), otherwise None.
+        """
+        try:
+            query_embedding = embed_text(query)
+            query_vec = np.array(query_embedding)
+
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT f.corrected_answer, c.query,
+                                  1 - (f.embedding <=> %s) AS similarity
+                           FROM chat_feedback f
+                           JOIN chat_conversations c ON c.id = f.conversation_id
+                           WHERE f.rating = -1
+                             AND f.corrected_answer IS NOT NULL
+                             AND f.embedding IS NOT NULL
+                           ORDER BY f.embedding <=> %s
+                           LIMIT 1""",
+                        (query_vec, query_vec),
+                    )
+                    row = cur.fetchone()
+
+            if row and row[2] >= self.FEEDBACK_MIN_SIMILARITY:
+                logger.info(
+                    f"Feedback correction found (similarity={row[2]:.3f}) "
+                    f"for query '{query[:60]}' from original '{row[1][:60]}'"
+                )
+                return row[0]  # corrected_answer
+        except Exception as e:
+            logger.warning(f"Feedback lookup failed (non-critical): {e}")
+
+        return None
+
+    @staticmethod
+    def _build_history_messages(history: Optional[List[dict]] = None) -> List[dict]:
+        """Sanitize and truncate conversation history for LLM context."""
+        if not history:
+            return []
+
+        valid_roles = {"user", "assistant"}
+        cleaned = []
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            role = entry.get("role", "")
+            content = entry.get("content", "")
+            if role in valid_roles and isinstance(content, str) and content.strip():
+                cleaned.append({"role": role, "content": content})
+
+        # Keep only the last MAX_HISTORY_TURNS turns (each turn = 2 messages)
+        max_entries = Config.MAX_HISTORY_TURNS * 2
+        if len(cleaned) > max_entries:
+            cleaned = cleaned[-max_entries:]
+
+        return cleaned
 
     def _resolve_language(self, query: str, language: Optional[str] = None) -> str:
-        """Determine response language.
-
-        Priority:
-            1. Explicit language param from the frontend toggle ('en' or 'ar')
-            2. Auto-detect from the query text
-        """
-        if language and language in (Config.LANG_EN, Config.LANG_AR):
-            return language
+        """Determine response language. Always auto-detects from query text."""
         return LanguageDetector.detect(query)
+
+    @staticmethod
+    def _build_search_query(query: str, history: Optional[List[dict]] = None) -> str:
+        """Build a context-enriched query for retrieval.
+
+        Short follow-up messages like "how", "why", "tell me more" have no
+        semantic content on their own, so we prepend the last user message
+        to give the embedding meaningful context.
+        """
+        if not history or len(query.split()) > 4:
+            return query
+
+        last_user_msg = None
+        for entry in reversed(history):
+            if isinstance(entry, dict) and entry.get("role") == "user":
+                last_user_msg = entry.get("content", "")
+                break
+
+        if last_user_msg and last_user_msg.strip():
+            return f"{last_user_msg} {query}"
+        return query
 
     def answer(
         self,
         query: str,
         language: Optional[str] = None,
+        history: Optional[List[dict]] = None,
     ) -> Tuple[str, dict]:
-        """Generate answer and return results with debug info.
-
-        Args:
-            query: The user's question (Arabic or English).
-            language: Optional explicit language override ('en' or 'ar').
-                      If None, language is auto-detected from the query.
-
-        Returns:
-            Tuple of (answer_string, debug_dict).
-        """
+        """Generate answer and return results with debug info."""
         lang = self._resolve_language(query, language)
 
-        # Query all collections -- OpenAI embeddings handle Arabic natively
-        faq_results = self.faq_collection.query(query_texts=[query], n_results=5)
-        db_results = self.db_collection.query(query_texts=[query], n_results=5)
+        search_query = self._build_search_query(query, history)
+
+        # --- Cache lookup ---
+        cache_key = (search_query, lang)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            answer, debug = cached
+            debug = dict(debug)
+            debug["cache_hit"] = True
+            return answer, debug
+
+        # --- Cache miss: full retrieval + generation pipeline ---
+
+        cross_offset = (
+            Config.CROSS_LINGUAL_THRESHOLD_OFFSET
+            if lang == Config.LANG_AR
+            else 0.0
+        )
+
+        # Query all tables
+        faq_results = self._query_table("faq", search_query, 5, ["question", "answer"])
+        db_results = self._query_table("databases", search_query, 5, ["name", "description"])
 
         library_results = None
-        if self.library_collection is not None:
-            library_results = self.library_collection.query(query_texts=[query], n_results=3)
+        if self.library_available:
+            library_results = self._query_table("library_pages", search_query, 3, ["url", "title", "content"])
 
-        faq_scores = _chroma_distance_to_similarity(faq_results["distances"][0])
-        db_scores = _chroma_distance_to_similarity(db_results["distances"][0])
+        faq_scores = _pgvector_distance_to_similarity(faq_results["distances"][0])
+        db_scores = _pgvector_distance_to_similarity(db_results["distances"][0])
 
         library_scores = []
         if library_results is not None:
-            library_scores = _chroma_distance_to_similarity(library_results["distances"][0])
+            library_scores = _pgvector_distance_to_similarity(library_results["distances"][0])
 
         best_faq_score = faq_scores[0] if faq_scores else 0.0
         best_db_score = db_scores[0] if db_scores else 0.0
@@ -323,9 +478,31 @@ class LibraryChatbot:
 
         is_db_intent = IntentDetector.is_database_intent(query)
 
-        show_faq = best_faq_score >= Config.FAQ_MIN_CONFIDENCE
-        show_db = is_db_intent or best_db_score >= Config.DB_MIN_CONFIDENCE
-        show_library = bool(library_scores) and best_library_score >= Config.LIBRARY_MIN_CONFIDENCE
+        show_faq = best_faq_score >= (Config.FAQ_MIN_CONFIDENCE - cross_offset)
+        show_db = is_db_intent or best_db_score >= (Config.DB_MIN_CONFIDENCE - cross_offset)
+        show_library = bool(library_scores) and best_library_score >= (Config.LIBRARY_MIN_CONFIDENCE - cross_offset)
+
+        # Build retrieved_chunks: the actual text that was retrieved from each source
+        retrieved_chunks = []
+        for i, meta in enumerate(faq_results["metadatas"][0]):
+            retrieved_chunks.append({
+                "source": "faq",
+                "score": faq_scores[i] if i < len(faq_scores) else 0.0,
+                "text": f"Q: {meta.get('question', '')}\nA: {meta.get('answer', '')}",
+            })
+        for i, meta in enumerate(db_results["metadatas"][0]):
+            retrieved_chunks.append({
+                "source": "database",
+                "score": db_scores[i] if i < len(db_scores) else 0.0,
+                "text": f"{meta.get('name', '')}. {EmbeddingUtils.clean_html(meta.get('description', ''))}",
+            })
+        if library_results:
+            for i, meta in enumerate(library_results["metadatas"][0]):
+                retrieved_chunks.append({
+                    "source": "library_page",
+                    "score": library_scores[i] if i < len(library_scores) else 0.0,
+                    "text": f"{meta.get('title', '')}\n{EmbeddingUtils.clean_library_content(meta.get('content', ''))}",
+                })
 
         debug = {
             "faq_scores": [[id_, float(s)] for id_, s in zip(faq_results["ids"][0], faq_scores)],
@@ -335,44 +512,94 @@ class LibraryChatbot:
             "show_faq": show_faq,
             "show_db": show_db,
             "show_library": show_library,
-            "library_available": self.library_collection is not None,
+            "library_available": self.library_available,
             "chosen_source": None,
             "detected_language": lang,
+            "cache_hit": False,
             "faq_metadatas": faq_results["metadatas"][0],
             "db_metadatas": db_results["metadatas"][0],
             "library_metadatas": library_results["metadatas"][0] if library_results else [],
+            "retrieved_chunks": retrieved_chunks,
+            "query": query,
+            "search_query": search_query,
         }
+
+        # --- Check for admin feedback corrections ---
+        # If an admin has corrected a similar past query, use their answer
+        # as additional context for the LLM to generate a better response.
+        feedback_correction = self._lookup_feedback_correction(search_query)
+        if feedback_correction:
+            debug["chosen_source"] = "admin_feedback_correction"
+            debug["feedback_correction"] = feedback_correction
+            # Use LLM to blend the corrected answer with the query context
+            formatted = self._format_feedback_answer(
+                query=search_query,
+                corrected_answer=feedback_correction,
+                lang=lang,
+                history=history,
+            )
+            result = (formatted, debug)
+            self._cache.put(cache_key, result)
+            return result
 
         if show_db and is_db_intent:
             debug["chosen_source"] = "database (keyword intent)"
-            return self._format_db_recommendations(db_results, db_scores, lang, k=5), debug
+            result = (self._format_db_recommendations(db_results, db_scores, lang, k=5), debug)
+            self._cache.put(cache_key, result)
+            return result
 
         if show_library:
             debug["chosen_source"] = "library pages (scraped)"
-            return self._format_library_answer(query, library_results, library_scores, lang, k=3), debug
+            result = (self._format_library_answer(search_query, library_results, library_scores, lang, k=3, history=history), debug)
+            self._cache.put(cache_key, result)
+            return result
 
         if show_faq:
             debug["chosen_source"] = "FAQ"
-            return self._format_faq_answer(faq_results, lang), debug
+            result = (self._format_faq_answer(faq_results, lang, search_query, history=history), debug)
+            self._cache.put(cache_key, result)
+            return result
 
         if show_db:
             debug["chosen_source"] = "database (semantic)"
-            return self._format_db_recommendations(db_results, db_scores, lang, k=5), debug
+            result = (self._format_db_recommendations(db_results, db_scores, lang, k=5), debug)
+            self._cache.put(cache_key, result)
+            return result
 
         debug["chosen_source"] = "none (unclear)"
-        return self._format_unclear(lang), debug
+        result = (self._format_unclear(lang), debug)
+        self._cache.put(cache_key, result)
+        return result
 
-    def _format_faq_answer(self, results: dict, lang: str) -> str:
-        """Format FAQ answer in the appropriate language.
-
-        The FAQ data is in English. When the language is Arabic, we use the
-        LLM to translate the answer so the student receives a natural response.
-        """
-        answer = results["metadatas"][0][0]["answer"]
+    def _format_faq_answer(self, results: dict, lang: str, query: str = "", history: Optional[List[dict]] = None) -> str:
+        """Format FAQ answer using the LLM for a natural, readable response."""
+        raw_answer = results["metadatas"][0][0]["answer"]
+        question = results["metadatas"][0][0].get("question", query)
         templates = _RESPONSE_TEMPLATES[lang]
 
-        if lang == Config.LANG_AR:
-            answer = self._translate_to_arabic(answer)
+        system_prompt = _SYSTEM_PROMPTS[lang]
+        history_msgs = self._build_history_messages(history)
+
+        try:
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(history_msgs)
+            messages.append({
+                "role": "user",
+                "content": f"Context:\nFAQ Question: {question}\nFAQ Answer: {raw_answer}\n\nQuestion: {query}",
+            })
+
+            resp = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.2,
+                max_tokens=500,
+            )
+            answer = resp.choices[0].message.content
+        except Exception as e:
+            logger.error(f"LLM formatting of FAQ answer failed: {e}")
+            answer = raw_answer
+            if lang == Config.LANG_AR:
+                answer = self._translate_to_arabic(answer)
 
         return f"{templates['faq_header']}{answer}"
 
@@ -407,6 +634,7 @@ class LibraryChatbot:
         scores: List[float],
         lang: str,
         k: int = 3,
+        history: Optional[List[dict]] = None,
     ) -> str:
         """Use the LLM to synthesize a clean answer from retrieved library pages."""
         context_parts = []
@@ -420,19 +648,18 @@ class LibraryChatbot:
         context = "\n\n---\n\n".join(context_parts)
 
         system_prompt = _SYSTEM_PROMPTS[lang]
+        history_msgs = self._build_history_messages(history)
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history_msgs)
+        messages.append({
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {query}",
+        })
 
         resp = self.client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nQuestion: {query}",
-                },
-            ],
+            messages=messages,
             temperature=0.2,
             max_tokens=500,
         )
@@ -442,17 +669,57 @@ class LibraryChatbot:
         templates = _RESPONSE_TEMPLATES[lang]
         return f"{answer}\n\n{templates['sources_label']} {source_links}"
 
+    def _format_feedback_answer(
+        self,
+        query: str,
+        corrected_answer: str,
+        lang: str,
+        history: Optional[List[dict]] = None,
+    ) -> str:
+        """Format an answer using an admin-corrected answer as the primary source.
+
+        The LLM adapts the corrected answer to the current query wording and
+        language while staying faithful to the admin's correction.
+        """
+        system_prompt = _SYSTEM_PROMPTS[lang]
+        history_msgs = self._build_history_messages(history)
+
+        try:
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(history_msgs)
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Context:\n"
+                    f"A library administrator has provided this verified answer "
+                    f"for a similar question:\n{corrected_answer}\n\n"
+                    f"Question: {query}\n\n"
+                    f"Use the verified answer above as the primary source. "
+                    f"Adapt it to the question if needed, but do not add information "
+                    f"that is not in the verified answer."
+                ),
+            })
+
+            resp = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.2,
+                max_tokens=500,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Feedback answer formatting failed: {e}")
+            # Fallback: return the corrected answer directly
+            if lang == Config.LANG_AR:
+                return self._translate_to_arabic(corrected_answer)
+            return corrected_answer
+
     def _format_unclear(self, lang: str) -> str:
         """Format unclear-intent message in the appropriate language."""
         return _RESPONSE_TEMPLATES[lang]["unclear"]
 
     def _translate_to_arabic(self, text: str) -> str:
-        """Translate an English text snippet to Arabic using the LLM.
-
-        Used for FAQ answers and database descriptions that are stored in
-        English but need to be presented in Arabic. The translation is kept
-        concise and preserves any proper nouns or technical terms.
-        """
+        """Translate an English text snippet to Arabic using the LLM."""
         try:
             resp = self.client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -485,5 +752,4 @@ class LibraryChatbot:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error(f"Translation to Arabic failed: {e}")
-            # Fall back to the original English text rather than failing
             return text

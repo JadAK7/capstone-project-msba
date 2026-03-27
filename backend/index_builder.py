@@ -1,106 +1,104 @@
 """
 index_builder.py
-Builds ChromaDB collections from source CSV files.
+Builds PostgreSQL tables from source CSV files using pgvector embeddings.
 """
 
 import os
+import numpy as np
 import pandas as pd
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 import logging
 
 from .chatbot import Config
+from .database import get_connection
+from .embeddings import embed_texts
 
 logger = logging.getLogger(__name__)
 
 
 class IndexBuilder:
-    """Builds ChromaDB indices if they don't exist."""
+    """Builds pgvector indices from CSV source data."""
 
     @staticmethod
     def indices_exist() -> bool:
-        """Check if ChromaDB collections exist with data."""
+        """Check if tables have data."""
         try:
-            client = chromadb.PersistentClient(path=Config.CHROMA_DIR)
-            for name in [Config.FAQ_COLLECTION, Config.DB_COLLECTION]:
-                col = client.get_collection(name)
-                if col.count() == 0:
-                    return False
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    for table in ["faq", "databases"]:
+                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        if cur.fetchone()[0] == 0:
+                            return False
             return True
-        except (ValueError, Exception):
+        except Exception:
             return False
 
     @staticmethod
     def build_indices(api_key: str) -> None:
-        """Build all indices from source CSV files into ChromaDB."""
+        """Build all indices from source CSV files into PostgreSQL."""
         project_root = os.path.dirname(os.path.dirname(__file__))
-        faq_path = os.path.join(project_root, "library_faq_clean.csv")
-        db_path = os.path.join(project_root, "Databases description.csv")
+        faq_path = os.path.join(project_root, "data", "library_faq_clean.csv")
+        db_path = os.path.join(project_root, "data", "Databases description.csv")
 
-        embedding_fn = OpenAIEmbeddingFunction(
-            api_key=api_key,
-            model_name=Config.EMBEDDING_MODEL,
-        )
-        client = chromadb.PersistentClient(path=Config.CHROMA_DIR)
-
-        # Build FAQ collection
-        logger.info("Building FAQ collection...")
+        # Build FAQ table
+        logger.info("Building FAQ table...")
         faq = pd.read_csv(faq_path)
         faq["question"] = faq["question"].fillna("").astype(str).str.strip()
         faq["answer"] = faq["answer"].fillna("").astype(str).str.strip()
         faq = faq[(faq["question"] != "") & (faq["answer"] != "")].reset_index(drop=True)
 
-        try:
-            client.delete_collection(Config.FAQ_COLLECTION)
-        except (ValueError, Exception):
-            pass
+        documents = faq["question"].tolist()
+        logger.info(f"Generating embeddings for {len(documents)} FAQ entries...")
+        embeddings = embed_texts(documents)
 
-        faq_col = client.create_collection(
-            name=Config.FAQ_COLLECTION,
-            embedding_function=embedding_fn,
-            metadata={"hnsw:space": "cosine"},
-        )
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE faq")
+                for i, (_, row) in enumerate(faq.iterrows()):
+                    cur.execute(
+                        "INSERT INTO faq (id, document, embedding, question, answer) "
+                        "VALUES (%s, %s, %s, %s, %s) "
+                        "ON CONFLICT (id) DO UPDATE SET "
+                        "document=EXCLUDED.document, embedding=EXCLUDED.embedding, "
+                        "question=EXCLUDED.question, answer=EXCLUDED.answer",
+                        (
+                            f"faq_{i}",
+                            row["question"],
+                            np.array(embeddings[i]),
+                            row["question"],
+                            row["answer"],
+                        ),
+                    )
+            conn.commit()
+        logger.info(f"FAQ table: {len(faq)} entries")
 
-        batch_size = 100
-        for i in range(0, len(faq), batch_size):
-            batch = faq.iloc[i:i + batch_size]
-            faq_col.upsert(
-                ids=[f"faq_{j}" for j in range(i, i + len(batch))],
-                documents=batch["question"].tolist(),
-                metadatas=[
-                    {"question": row["question"], "answer": row["answer"]}
-                    for _, row in batch.iterrows()
-                ],
-            )
-        logger.info(f"FAQ collection: {faq_col.count()} entries")
-
-        # Build Database collection
-        logger.info("Building Database collection...")
+        # Build Database table
+        logger.info("Building Database table...")
         db = pd.read_csv(db_path)
         db["name"] = db["name"].fillna("").astype(str).str.strip()
         db["description"] = db["description"].fillna("").astype(str).str.strip()
         db = db[(db["name"] != "") & (db["description"] != "")].reset_index(drop=True)
 
-        try:
-            client.delete_collection(Config.DB_COLLECTION)
-        except (ValueError, Exception):
-            pass
+        documents = (db["name"] + ". " + db["description"]).tolist()
+        logger.info(f"Generating embeddings for {len(documents)} database entries...")
+        embeddings = embed_texts(documents)
 
-        db_col = client.create_collection(
-            name=Config.DB_COLLECTION,
-            embedding_function=embedding_fn,
-            metadata={"hnsw:space": "cosine"},
-        )
-
-        for i in range(0, len(db), batch_size):
-            batch = db.iloc[i:i + batch_size]
-            documents = (batch["name"] + ". " + batch["description"]).tolist()
-            db_col.upsert(
-                ids=[f"db_{j}" for j in range(i, i + len(batch))],
-                documents=documents,
-                metadatas=[
-                    {"name": row["name"], "description": row["description"]}
-                    for _, row in batch.iterrows()
-                ],
-            )
-        logger.info(f"Database collection: {db_col.count()} entries")
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE databases")
+                for i, (_, row) in enumerate(db.iterrows()):
+                    cur.execute(
+                        "INSERT INTO databases (id, document, embedding, name, description) "
+                        "VALUES (%s, %s, %s, %s, %s) "
+                        "ON CONFLICT (id) DO UPDATE SET "
+                        "document=EXCLUDED.document, embedding=EXCLUDED.embedding, "
+                        "name=EXCLUDED.name, description=EXCLUDED.description",
+                        (
+                            f"db_{i}",
+                            documents[i],
+                            np.array(embeddings[i]),
+                            row["name"],
+                            row["description"],
+                        ),
+                    )
+            conn.commit()
+        logger.info(f"Database table: {len(db)} entries")

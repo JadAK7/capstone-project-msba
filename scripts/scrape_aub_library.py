@@ -2,22 +2,27 @@
 AUB Library Website Scraper
 Scrapes all pages from the AUB library website using Playwright (headless browser)
 so that JavaScript-rendered content (e.g. opening hours) is captured.
-Stores results in ChromaDB vector database.
+Stores results in PostgreSQL with pgvector embeddings.
 """
 
 import os
+import sys
 import re
 import time
+import numpy as np
 from urllib.parse import urlparse
 from collections import deque
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from tqdm import tqdm
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from backend.database import init_db, get_connection
+from backend.embeddings import embed_texts
 
 # Configuration
 START_URLS = [
@@ -33,9 +38,6 @@ PAGE_TIMEOUT = 60000  # 60 seconds for page navigation
 MAX_RETRIES = 3  # Retry failed page loads
 RETRY_DELAY = 2  # Seconds between retries
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-CHROMA_DIR = "./chroma_db"
-LIBRARY_COLLECTION = "library_pages"
-EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 class AUBLibraryScraper:
@@ -172,7 +174,7 @@ class AUBLibraryScraper:
 
         # Print failure summary
         if self.failed_pages:
-            print(f"\n⚠️  Failed pages: {len(self.failed_pages)}")
+            print(f"\nFailed pages: {len(self.failed_pages)}")
             print("\nFailed URLs:")
             for failure in self.failed_pages[:10]:  # Show first 10 failures
                 print(f"  - {failure['url']}")
@@ -180,59 +182,59 @@ class AUBLibraryScraper:
             if len(self.failed_pages) > 10:
                 print(f"  ... and {len(self.failed_pages) - 10} more")
         else:
-            print("\n✅ No failed pages!")
+            print("\nNo failed pages!")
 
         return self.scraped_data
 
 
 def build_library_index(scraped_data):
-    """Build ChromaDB collection from scraped library pages."""
+    """Build PostgreSQL library_pages table from scraped data."""
     print("\n" + "="*60)
-    print("Building Library Pages Collection in ChromaDB")
+    print("Building Library Pages Table in PostgreSQL")
     print("="*60)
 
     print(f"\nTotal pages scraped: {len(scraped_data)}")
 
-    embedding_fn = OpenAIEmbeddingFunction(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        model_name=EMBEDDING_MODEL,
-    )
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
+    # Generate embeddings for all documents
+    documents = [f"{item['title']}\n\n{item['content']}" for item in scraped_data]
+    print("Generating embeddings...")
+    embeddings = embed_texts(documents)
 
-    # Delete existing collection and recreate
-    try:
-        chroma_client.delete_collection(LIBRARY_COLLECTION)
-    except (ValueError, Exception):
-        pass
+    # Insert into PostgreSQL
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE library_pages")
+            batch_size = 50
+            for i in tqdm(range(0, len(scraped_data), batch_size), desc="Inserting into PostgreSQL"):
+                batch = scraped_data[i:i + batch_size]
+                for j, item in enumerate(batch):
+                    idx = i + j
+                    cur.execute(
+                        "INSERT INTO library_pages (id, document, embedding, url, title, content) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (
+                            f"page_{idx}",
+                            documents[idx],
+                            np.array(embeddings[idx]),
+                            item["url"],
+                            item["title"],
+                            item["content"],
+                        ),
+                    )
+        conn.commit()
 
-    collection = chroma_client.create_collection(
-        name=LIBRARY_COLLECTION,
-        embedding_function=embedding_fn,
-        metadata={"hnsw:space": "cosine"},
-    )
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM library_pages")
+            count = cur.fetchone()[0]
 
-    # Upsert in batches
-    batch_size = 50
-    for i in tqdm(range(0, len(scraped_data), batch_size), desc="Upserting to ChromaDB"):
-        batch = scraped_data[i:i + batch_size]
-
-        ids = [f"page_{j}" for j in range(i, i + len(batch))]
-        documents = [f"{item['title']}\n\n{item['content']}" for item in batch]
-        metadatas = [
-            {"url": item["url"], "title": item["title"], "content": item["content"]}
-            for item in batch
-        ]
-
-        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
-
-    count = collection.count()
-    print(f"\nLibrary pages collection saved: {count} entries")
+    print(f"\nLibrary pages table saved: {count} entries")
 
     print("\n" + "="*60)
-    print("Collection building complete!")
+    print("Table building complete!")
     print("="*60)
 
-    return collection
+    return count
 
 
 def main():
@@ -242,10 +244,13 @@ def main():
     print("="*60)
 
     if not os.environ.get("OPENAI_API_KEY"):
-        print("\n⚠️  Warning: OPENAI_API_KEY environment variable not set!")
+        print("\nWarning: OPENAI_API_KEY environment variable not set!")
         print("Please set it before running this script:")
         print("export OPENAI_API_KEY='your-api-key-here'")
         return
+
+    # Initialize database
+    init_db()
 
     scraper = AUBLibraryScraper(
         start_urls=START_URLS,
@@ -256,14 +261,14 @@ def main():
     scraped_data = scraper.crawl(max_pages=MAX_PAGES)
 
     if not scraped_data:
-        print("\n⚠️  No data scraped! Please check the website URL and configuration.")
+        print("\nNo data scraped! Please check the website URL and configuration.")
         return
 
-    collection = build_library_index(scraped_data)
+    count = build_library_index(scraped_data)
 
-    print("\n✅ All done!")
-    print(f"\nLibrary pages are stored in ChromaDB at: {CHROMA_DIR}")
-    print(f"Collection '{LIBRARY_COLLECTION}' has {collection.count()} entries")
+    print("\nAll done!")
+    print(f"\nLibrary pages are stored in PostgreSQL")
+    print(f"Table 'library_pages' has {count} entries")
 
     print("\n" + "="*60)
     print("Sample of scraped pages:")

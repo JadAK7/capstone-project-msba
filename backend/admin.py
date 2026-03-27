@@ -1,17 +1,16 @@
 """
 admin.py
-Admin API logic for managing ChromaDB collections (CRUD operations).
+Admin API logic for managing PostgreSQL collections (CRUD operations).
 """
 
-import os
 import time
 import logging
+import numpy as np
 from typing import Optional
 
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
-
 from .chatbot import Config
+from .database import get_connection
+from .embeddings import embed_text
 
 logger = logging.getLogger(__name__)
 
@@ -34,26 +33,28 @@ def get_server_start_time() -> float:
     return _server_start_time
 
 
+# Map collection names to their table schemas
+_TABLE_META = {
+    Config.FAQ_COLLECTION: {
+        "table": "faq",
+        "metadata_cols": ["question", "answer"],
+    },
+    Config.DB_COLLECTION: {
+        "table": "databases",
+        "metadata_cols": ["name", "description"],
+    },
+    Config.LIBRARY_COLLECTION: {
+        "table": "library_pages",
+        "metadata_cols": ["url", "title", "content"],
+    },
+}
+
+
 class AdminManager:
-    """Manages direct ChromaDB operations for admin CRUD."""
+    """Manages direct PostgreSQL operations for admin CRUD."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.embedding_fn = OpenAIEmbeddingFunction(
-            api_key=api_key,
-            model_name=Config.EMBEDDING_MODEL,
-        )
-        self.chroma_client = chromadb.PersistentClient(path=Config.CHROMA_DIR)
-
-    def _get_collection(self, name: str):
-        """Get a ChromaDB collection by name, or None if it doesn't exist."""
-        try:
-            return self.chroma_client.get_collection(
-                name=name,
-                embedding_function=self.embedding_fn,
-            )
-        except (ValueError, Exception):
-            return None
 
     # ------------------------------------------------------------------
     # Collection browsing
@@ -62,40 +63,51 @@ class AdminManager:
     def list_collections(self) -> list:
         """Return list of collections with document counts."""
         results = []
-        for name in [Config.FAQ_COLLECTION, Config.DB_COLLECTION, Config.LIBRARY_COLLECTION]:
-            col = self._get_collection(name)
-            count = col.count() if col else 0
-            results.append({"name": name, "count": count})
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                for name in [Config.FAQ_COLLECTION, Config.DB_COLLECTION, Config.LIBRARY_COLLECTION]:
+                    table = _TABLE_META[name]["table"]
+                    try:
+                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        count = cur.fetchone()[0]
+                    except Exception:
+                        conn.rollback()
+                        count = 0
+                    results.append({"name": name, "count": count})
         return results
 
     def get_collection_entries(self, collection_name: str, offset: int = 0, limit: int = 20) -> dict:
-        """Return paginated entries from a collection."""
-        col = self._get_collection(collection_name)
-        if col is None:
+        """Return paginated entries from a table."""
+        meta = _TABLE_META.get(collection_name)
+        if meta is None:
             return {"entries": [], "total": 0, "offset": offset, "limit": limit}
 
-        total = col.count()
-        if total == 0:
-            return {"entries": [], "total": 0, "offset": offset, "limit": limit}
+        table = meta["table"]
+        metadata_cols = meta["metadata_cols"]
 
-        # ChromaDB get() returns all documents; we paginate manually
-        all_data = col.get(
-            include=["documents", "metadatas"],
-            limit=limit,
-            offset=offset,
-        )
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                total = cur.fetchone()[0]
+
+                if total == 0:
+                    return {"entries": [], "total": 0, "offset": offset, "limit": limit}
+
+                cols = ", ".join(metadata_cols)
+                cur.execute(
+                    f"SELECT id, document, {cols} FROM {table} ORDER BY id LIMIT %s OFFSET %s",
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
 
         entries = []
-        ids = all_data.get("ids", [])
-        documents = all_data.get("documents", [])
-        metadatas = all_data.get("metadatas", [])
-
-        for i in range(len(ids)):
-            entries.append({
-                "id": ids[i],
-                "document": documents[i] if i < len(documents) else "",
-                "metadata": metadatas[i] if i < len(metadatas) else {},
-            })
+        for row in rows:
+            entry = {
+                "id": row[0],
+                "document": row[1],
+                "metadata": {col: row[2 + i] for i, col in enumerate(metadata_cols)},
+            }
+            entries.append(entry)
 
         return {
             "entries": entries,
@@ -109,12 +121,10 @@ class AdminManager:
     # ------------------------------------------------------------------
 
     def _next_faq_id(self) -> str:
-        col = self._get_collection(Config.FAQ_COLLECTION)
-        if col is None:
-            return "faq_0"
-        count = col.count()
-        # Find the max existing numeric suffix to avoid collisions
-        all_ids = col.get(include=[])["ids"]
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM faq")
+                all_ids = [row[0] for row in cur.fetchall()]
         max_num = -1
         for id_ in all_ids:
             try:
@@ -127,43 +137,44 @@ class AdminManager:
 
     def add_faq(self, question: str, answer: str) -> dict:
         """Add a new FAQ entry."""
-        col = self._get_collection(Config.FAQ_COLLECTION)
-        if col is None:
-            raise ValueError("FAQ collection does not exist. Run re-index first.")
-
         entry_id = self._next_faq_id()
-        col.upsert(
-            ids=[entry_id],
-            documents=[question],
-            metadatas=[{"question": question, "answer": answer}],
-        )
+        embedding = embed_text(question)
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO faq (id, document, embedding, question, answer) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (entry_id, question, np.array(embedding), question, answer),
+                )
+            conn.commit()
         return {"id": entry_id, "question": question, "answer": answer}
 
     def update_faq(self, entry_id: str, question: str, answer: str) -> dict:
         """Update an existing FAQ entry."""
-        col = self._get_collection(Config.FAQ_COLLECTION)
-        if col is None:
-            raise ValueError("FAQ collection does not exist.")
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM faq WHERE id = %s", (entry_id,))
+                if cur.fetchone() is None:
+                    raise KeyError(f"FAQ entry '{entry_id}' not found.")
 
-        # Verify entry exists
-        existing = col.get(ids=[entry_id], include=["documents"])
-        if not existing["ids"]:
-            raise KeyError(f"FAQ entry '{entry_id}' not found.")
+        embedding = embed_text(question)
 
-        col.upsert(
-            ids=[entry_id],
-            documents=[question],
-            metadatas=[{"question": question, "answer": answer}],
-        )
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE faq SET document=%s, embedding=%s, question=%s, answer=%s WHERE id=%s",
+                    (question, np.array(embedding), question, answer, entry_id),
+                )
+            conn.commit()
         return {"id": entry_id, "question": question, "answer": answer}
 
     def delete_faq(self, entry_id: str) -> dict:
         """Delete an FAQ entry."""
-        col = self._get_collection(Config.FAQ_COLLECTION)
-        if col is None:
-            raise ValueError("FAQ collection does not exist.")
-
-        col.delete(ids=[entry_id])
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM faq WHERE id = %s", (entry_id,))
+            conn.commit()
         return {"id": entry_id, "deleted": True}
 
     # ------------------------------------------------------------------
@@ -171,10 +182,10 @@ class AdminManager:
     # ------------------------------------------------------------------
 
     def _next_db_id(self) -> str:
-        col = self._get_collection(Config.DB_COLLECTION)
-        if col is None:
-            return "db_0"
-        all_ids = col.get(include=[])["ids"]
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM databases")
+                all_ids = [row[0] for row in cur.fetchall()]
         max_num = -1
         for id_ in all_ids:
             try:
@@ -187,44 +198,46 @@ class AdminManager:
 
     def add_database(self, name: str, description: str) -> dict:
         """Add a new database description entry."""
-        col = self._get_collection(Config.DB_COLLECTION)
-        if col is None:
-            raise ValueError("Databases collection does not exist. Run re-index first.")
-
         entry_id = self._next_db_id()
         document = f"{name}. {description}"
-        col.upsert(
-            ids=[entry_id],
-            documents=[document],
-            metadatas=[{"name": name, "description": description}],
-        )
+        embedding = embed_text(document)
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO databases (id, document, embedding, name, description) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (entry_id, document, np.array(embedding), name, description),
+                )
+            conn.commit()
         return {"id": entry_id, "name": name, "description": description}
 
     def update_database(self, entry_id: str, name: str, description: str) -> dict:
         """Update an existing database entry."""
-        col = self._get_collection(Config.DB_COLLECTION)
-        if col is None:
-            raise ValueError("Databases collection does not exist.")
-
-        existing = col.get(ids=[entry_id], include=["documents"])
-        if not existing["ids"]:
-            raise KeyError(f"Database entry '{entry_id}' not found.")
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM databases WHERE id = %s", (entry_id,))
+                if cur.fetchone() is None:
+                    raise KeyError(f"Database entry '{entry_id}' not found.")
 
         document = f"{name}. {description}"
-        col.upsert(
-            ids=[entry_id],
-            documents=[document],
-            metadatas=[{"name": name, "description": description}],
-        )
+        embedding = embed_text(document)
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE databases SET document=%s, embedding=%s, name=%s, description=%s WHERE id=%s",
+                    (document, np.array(embedding), name, description, entry_id),
+                )
+            conn.commit()
         return {"id": entry_id, "name": name, "description": description}
 
     def delete_database(self, entry_id: str) -> dict:
         """Delete a database entry."""
-        col = self._get_collection(Config.DB_COLLECTION)
-        if col is None:
-            raise ValueError("Databases collection does not exist.")
-
-        col.delete(ids=[entry_id])
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM databases WHERE id = %s", (entry_id,))
+            conn.commit()
         return {"id": entry_id, "deleted": True}
 
     # ------------------------------------------------------------------
@@ -233,11 +246,10 @@ class AdminManager:
 
     def delete_library_page(self, entry_id: str) -> dict:
         """Delete a library page entry."""
-        col = self._get_collection(Config.LIBRARY_COLLECTION)
-        if col is None:
-            raise ValueError("Library pages collection does not exist.")
-
-        col.delete(ids=[entry_id])
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM library_pages WHERE id = %s", (entry_id,))
+            conn.commit()
         return {"id": entry_id, "deleted": True}
 
     # ------------------------------------------------------------------
@@ -250,7 +262,7 @@ class AdminManager:
         return {
             "collections": collections,
             "embedding_model": Config.EMBEDDING_MODEL,
-            "chroma_dir": Config.CHROMA_DIR,
+            "database": "PostgreSQL + pgvector",
             "last_index_build": get_last_index_build_time(),
             "server_start_time": get_server_start_time(),
             "server_uptime_seconds": time.time() - get_server_start_time(),

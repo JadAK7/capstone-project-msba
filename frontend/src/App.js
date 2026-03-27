@@ -9,6 +9,19 @@ import { sendMessage, checkHealth } from './api';
 import { LanguageProvider, useLanguage } from './LanguageContext';
 import { t } from './i18n';
 
+/** Maximum number of conversation turns (user+assistant pairs) to send as history. */
+const MAX_HISTORY_TURNS = 5;
+
+/**
+ * Lightweight client-side Arabic detection.
+ * Mirrors the backend's LanguageDetector logic: any Arabic Unicode character
+ * present means the message is in Arabic.
+ */
+function detectLanguage(text) {
+  const arabicPattern = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+  return arabicPattern.test(text) ? 'ar' : 'en';
+}
+
 function ChatPage() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -28,18 +41,31 @@ function ChatPage() {
   }, []);
 
   const handleSubmit = async (message) => {
-    const userMessage = { role: 'user', content: message };
+    // Detect language on the user message for per-message RTL/LTR rendering
+    const userMessage = {
+      role: 'user',
+      content: message,
+      detectedLanguage: detectLanguage(message),
+    };
     setMessages((prev) => [...prev, userMessage]);
     setLoading(true);
     setError(null);
 
+    // Build history from existing messages (before this new message).
+    // messages state captures all turns prior to the current user message.
+    const maxEntries = MAX_HISTORY_TURNS * 2;
+    const recentMessages = messages.slice(-maxEntries);
+    const history = recentMessages.map(({ role, content }) => ({ role, content }));
+
     try {
-      const response = await sendMessage(message, language);
+      // Never send a language parameter -- the backend auto-detects per message
+      const response = await sendMessage(message, history);
+      const detectedLang = response.detected_language || null;
       const assistantMessage = {
         role: 'assistant',
         content: response.answer || 'No response received.',
         debug: response.debug || null,
-        detectedLanguage: response.detected_language || null,
+        detectedLanguage: detectedLang,
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err) {
@@ -47,6 +73,7 @@ function ChatPage() {
       const errorMessage = {
         role: 'assistant',
         content: `Sorry, I encountered an error: ${err.message}. Please try again.`,
+        detectedLanguage: 'en',
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {

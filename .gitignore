@@ -19,10 +19,8 @@ venv/
 env/
 ENV/
 
-# ChromaDB vector database (generated)
+# Legacy artifacts (unused)
 chroma_db/
-
-# Legacy embedding artifacts (pre-ChromaDB)
 *.npy
 *.parquet
 

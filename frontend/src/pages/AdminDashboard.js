@@ -12,11 +12,18 @@ import {
   deleteDatabase,
   deleteLibraryPage,
   triggerReindex,
+  triggerRescrape,
+  getRescrapeStatus,
   getSystemInfo,
   checkHealth,
   getAnalyticsSummary,
   getAnalyticsTrends,
   getTopQueries,
+  getUnansweredQueries,
+  getAnalyticsCharts,
+  getConversations,
+  submitFeedback,
+  getFeedbackStats,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +51,8 @@ function SystemStatusTab() {
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [reindexing, setReindexing] = useState(false);
+  const [scraping, setScraping] = useState(false);
+  const [scrapeMessage, setScrapeMessage] = useState('');
   const [toast, setToast] = useState(null);
 
   const loadData = useCallback(async () => {
@@ -72,6 +81,39 @@ function SystemStatusTab() {
       setToast({ message: `Re-index failed: ${err.message}`, type: 'error' });
     } finally {
       setReindexing(false);
+    }
+  };
+
+  const handleRescrape = async () => {
+    if (!window.confirm('This will re-scrape the AUB library website and rebuild the library pages index. This may take several minutes. Continue?')) return;
+    setScraping(true);
+    setScrapeMessage('Starting scrape...');
+    try {
+      await triggerRescrape();
+      // Poll for status
+      const poll = setInterval(async () => {
+        try {
+          const status = await getRescrapeStatus();
+          setScrapeMessage(status.message || 'Scraping...');
+          if (!status.running) {
+            clearInterval(poll);
+            setScraping(false);
+            if (status.error) {
+              setToast({ message: `Scrape failed: ${status.error}`, type: 'error' });
+            } else {
+              setToast({ message: status.message || 'Scraping completed successfully.', type: 'success' });
+              await loadData();
+            }
+          }
+        } catch {
+          clearInterval(poll);
+          setScraping(false);
+          setToast({ message: 'Lost connection while checking scrape status.', type: 'error' });
+        }
+      }, 3000);
+    } catch (err) {
+      setScraping(false);
+      setToast({ message: `Scrape failed: ${err.message}`, type: 'error' });
     }
   };
 
@@ -125,17 +167,33 @@ function SystemStatusTab() {
       </div>
 
       <h3 className="admin-section-title">Maintenance</h3>
-      <button
-        className="admin-btn admin-btn-primary"
-        onClick={handleReindex}
-        disabled={reindexing}
-      >
-        {reindexing ? (
-          <span className="admin-btn-loading">Re-indexing...</span>
-        ) : (
-          'Re-index All Collections'
-        )}
-      </button>
+      <div className="admin-maintenance-buttons">
+        <button
+          className="admin-btn admin-btn-primary"
+          onClick={handleReindex}
+          disabled={reindexing || scraping}
+        >
+          {reindexing ? (
+            <span className="admin-btn-loading">Re-indexing...</span>
+          ) : (
+            'Re-index All Collections'
+          )}
+        </button>
+        <button
+          className="admin-btn admin-btn-primary"
+          onClick={handleRescrape}
+          disabled={scraping || reindexing}
+        >
+          {scraping ? (
+            <span className="admin-btn-loading">Scraping...</span>
+          ) : (
+            'Re-scrape Library Website'
+          )}
+        </button>
+      </div>
+      {scraping && scrapeMessage && (
+        <div className="admin-scrape-status">{scrapeMessage}</div>
+      )}
     </div>
   );
 }
@@ -150,6 +208,8 @@ function DataManagementTab() {
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
+
+  const [reindexing, setReindexing] = useState(false);
 
   // Add/Edit form state
   const [showAddForm, setShowAddForm] = useState(false);
@@ -254,6 +314,20 @@ function DataManagementTab() {
     }
   };
 
+  const handleReindex = async () => {
+    if (!window.confirm('This will rebuild all collections from CSV source files and update embeddings. Continue?')) return;
+    setReindexing(true);
+    try {
+      await triggerReindex();
+      setToast({ message: 'Re-indexing completed successfully. Embeddings are now up to date.', type: 'success' });
+      await loadEntries();
+    } catch (err) {
+      setToast({ message: `Re-index failed: ${err.message}`, type: 'error' });
+    } finally {
+      setReindexing(false);
+    }
+  };
+
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
@@ -276,6 +350,14 @@ function DataManagementTab() {
           </button>
         ))}
       </div>
+
+      {activeCollection === 'library_pages' && (
+        <div className="admin-info-note">
+          Library pages are populated automatically by the web scraper. You can delete entries here
+          but cannot add or edit them manually. To refresh this data, use the
+          "Re-scrape Library Website" button on the System Status tab.
+        </div>
+      )}
 
       {canEdit && (
         <div className="admin-actions-bar">
@@ -328,7 +410,7 @@ function DataManagementTab() {
                   <th>ID</th>
                   {activeCollection === 'faq' && <><th>Question</th><th>Answer</th></>}
                   {activeCollection === 'databases' && <><th>Name</th><th>Description</th></>}
-                  {activeCollection === 'library_pages' && <><th>Title</th><th>URL</th></>}
+                  {activeCollection === 'library_pages' && <><th>Title</th><th>URL</th><th>Content Preview</th></>}
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -410,6 +492,13 @@ function DataManagementTab() {
                               {entry.metadata?.url || ''}
                             </a>
                           </td>
+                          <td>
+                            <span className="admin-td-content-preview">
+                              {entry.metadata?.content
+                                ? entry.metadata.content.substring(0, 150) + (entry.metadata.content.length > 150 ? '...' : '')
+                                : ''}
+                            </span>
+                          </td>
                         </>
                       )}
 
@@ -432,7 +521,7 @@ function DataManagementTab() {
                   );
                 })}
                 {entries.length === 0 && (
-                  <tr><td colSpan={4} className="admin-empty">No entries found.</td></tr>
+                  <tr><td colSpan={activeCollection === 'library_pages' ? 5 : 4} className="admin-empty">No entries found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -459,32 +548,67 @@ function DataManagementTab() {
           )}
         </>
       )}
+
+      <div className="admin-reindex-footer">
+        <button
+          className="admin-btn admin-btn-primary"
+          onClick={handleReindex}
+          disabled={reindexing}
+        >
+          {reindexing ? (
+            <span className="admin-btn-loading">Re-indexing...</span>
+          ) : (
+            'Re-index All Collections'
+          )}
+        </button>
+        <span className="admin-reindex-hint">
+          Rebuild embeddings after adding, editing, or deleting entries to update search results.
+        </span>
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Analytics Tab
+// Analytics Tab (with matplotlib charts)
 // ---------------------------------------------------------------------------
+
+const CHART_SECTIONS = [
+  { key: 'usage_volume', label: 'Usage & Volume' },
+  { key: 'language', label: 'Language' },
+  { key: 'retrieval_quality', label: 'Retrieval Quality' },
+  { key: 'intent_routing', label: 'Intent & Routing' },
+  { key: 'query_analysis', label: 'Query Analysis' },
+  { key: 'performance', label: 'Performance' },
+  { key: 'knowledge_gaps', label: 'Knowledge Gaps' },
+];
+
 function AnalyticsTab() {
   const [summary, setSummary] = useState(null);
-  const [trends, setTrends] = useState([]);
   const [topQueries, setTopQueries] = useState([]);
+  const [unanswered, setUnanswered] = useState(null);
+  const [chartData, setChartData] = useState(null);
+  const [extendedSummary, setExtendedSummary] = useState(null);
+  const [activeSection, setActiveSection] = useState('usage_volume');
   const [loading, setLoading] = useState(true);
+  const [chartsLoading, setChartsLoading] = useState(false);
   const [toast, setToast] = useState(null);
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       try {
-        const [s, t, q] = await Promise.all([
+        const [s, q, u, c] = await Promise.all([
           getAnalyticsSummary(),
-          getAnalyticsTrends(),
           getTopQueries(),
+          getUnansweredQueries(),
+          getAnalyticsCharts(),
         ]);
         setSummary(s);
-        setTrends(t);
         setTopQueries(q);
+        setUnanswered(u);
+        setChartData(c.charts || {});
+        setExtendedSummary(c.extended_summary || {});
       } catch (err) {
         setToast({ message: `Failed to load analytics: ${err.message}`, type: 'error' });
       } finally {
@@ -494,18 +618,33 @@ function AnalyticsTab() {
     load();
   }, []);
 
+  const handleRefreshCharts = async () => {
+    setChartsLoading(true);
+    try {
+      const c = await getAnalyticsCharts();
+      setChartData(c.charts || {});
+      setExtendedSummary(c.extended_summary || {});
+      setToast({ message: 'Charts refreshed.', type: 'success' });
+    } catch (err) {
+      setToast({ message: `Failed to refresh charts: ${err.message}`, type: 'error' });
+    } finally {
+      setChartsLoading(false);
+    }
+  };
+
   if (loading) return <div className="admin-loading">Loading analytics...</div>;
 
-  const maxTrendCount = Math.max(1, ...trends.map((t) => t.count));
+  const currentCharts = chartData?.[activeSection] || {};
 
   return (
     <div className="admin-tab-content">
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
 
-      <h3 className="admin-section-title">Conversation Summary</h3>
-      <div className="admin-cards-row">
+      {/* ---- Quick Summary Cards ---- */}
+      <h3 className="admin-section-title">Overview</h3>
+      <div className="analytics-summary-cards">
         <div className="admin-card">
-          <div className="admin-card-label">Total Conversations</div>
+          <div className="admin-card-label">Total Queries</div>
           <div className="admin-card-value">{summary?.total_conversations || 0}</div>
         </div>
         <div className="admin-card">
@@ -520,68 +659,84 @@ function AnalyticsTab() {
           <div className="admin-card-label">This Month</div>
           <div className="admin-card-value">{summary?.this_month || 0}</div>
         </div>
-      </div>
-
-      <h3 className="admin-section-title">Language Distribution</h3>
-      <div className="admin-bar-chart">
-        {Object.entries(summary?.language_distribution || {}).map(([lang, pct]) => (
-          <div className="admin-bar-row" key={lang}>
-            <span className="admin-bar-label">{lang === 'en' ? 'English' : lang === 'ar' ? 'Arabic' : lang}</span>
-            <div className="admin-bar-track">
-              <div
-                className="admin-bar-fill admin-bar-fill-primary"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <span className="admin-bar-value">{pct}%</span>
-          </div>
-        ))}
-        {Object.keys(summary?.language_distribution || {}).length === 0 && (
-          <div className="admin-empty">No data yet.</div>
-        )}
-      </div>
-
-      <h3 className="admin-section-title">Intent Distribution</h3>
-      <div className="admin-bar-chart">
-        {Object.entries(summary?.intent_distribution || {}).map(([intent, pct]) => (
-          <div className="admin-bar-row" key={intent}>
-            <span className="admin-bar-label">{intent}</span>
-            <div className="admin-bar-track">
-              <div
-                className="admin-bar-fill admin-bar-fill-accent"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <span className="admin-bar-value">{pct}%</span>
-          </div>
-        ))}
-        {Object.keys(summary?.intent_distribution || {}).length === 0 && (
-          <div className="admin-empty">No data yet.</div>
-        )}
-      </div>
-
-      <h3 className="admin-section-title">Daily Trends (Last 30 Days)</h3>
-      {trends.length > 0 ? (
-        <div className="admin-trends-chart">
-          {trends.map((day) => (
-            <div className="admin-trend-bar-col" key={day.date} title={`${day.date}: ${day.count} conversations`}>
-              <div className="admin-trend-bar-wrapper">
-                <div
-                  className="admin-trend-bar"
-                  style={{ height: `${(day.count / maxTrendCount) * 100}%` }}
-                />
-              </div>
-              <span className="admin-trend-label">
-                {day.date.slice(5)}
-              </span>
-            </div>
-          ))}
+        <div className="admin-card">
+          <div className="admin-card-label">Est. Sessions</div>
+          <div className="admin-card-value">{extendedSummary?.estimated_sessions || 0}</div>
         </div>
-      ) : (
-        <div className="admin-empty">No trend data yet.</div>
-      )}
+        <div className="admin-card">
+          <div className="admin-card-label">Avg Queries/Session</div>
+          <div className="admin-card-value">{extendedSummary?.avg_queries_per_session || 0}</div>
+        </div>
+        <div className="admin-card">
+          <div className="admin-card-label">Avg Response Time</div>
+          <div className="admin-card-value admin-card-value-small">
+            {extendedSummary?.avg_response_time_ms ? `${extendedSummary.avg_response_time_ms}ms` : 'N/A'}
+          </div>
+        </div>
+        <div className="admin-card">
+          <div className="admin-card-label">P95 Response Time</div>
+          <div className="admin-card-value admin-card-value-small">
+            {extendedSummary?.p95_response_time_ms ? `${extendedSummary.p95_response_time_ms}ms` : 'N/A'}
+          </div>
+        </div>
+        <div className="admin-card">
+          <div className="admin-card-label">Cache Hit Rate</div>
+          <div className="admin-card-value">{extendedSummary?.cache_hit_rate || 0}%</div>
+        </div>
+        <div className="admin-card">
+          <div className="admin-card-label">Unanswered Rate</div>
+          <div className="admin-card-value">{extendedSummary?.unanswered_rate || 0}%</div>
+        </div>
+      </div>
 
-      <h3 className="admin-section-title">Top Queries</h3>
+      {/* ---- Charts Section ---- */}
+      <div className="analytics-charts-header">
+        <h3 className="admin-section-title" style={{ marginBottom: 0 }}>Visualizations</h3>
+        <button
+          className="admin-btn admin-btn-sm admin-btn-secondary"
+          onClick={handleRefreshCharts}
+          disabled={chartsLoading}
+        >
+          {chartsLoading ? 'Refreshing...' : 'Refresh Charts'}
+        </button>
+      </div>
+
+      <div className="analytics-section-tabs">
+        {CHART_SECTIONS.map((s) => (
+          <button
+            key={s.key}
+            className={`analytics-section-tab ${activeSection === s.key ? 'active' : ''}`}
+            onClick={() => setActiveSection(s.key)}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="analytics-charts-grid">
+        {Object.entries(currentCharts).map(([key, chart]) => (
+          <div className="analytics-chart-card" key={key}>
+            <h4 className="analytics-chart-title">{chart?.title || key}</h4>
+            {chart?.image ? (
+              <img
+                src={`data:image/png;base64,${chart.image}`}
+                alt={chart.title || key}
+                className="analytics-chart-img"
+              />
+            ) : (
+              <div className="admin-empty" style={{ padding: '2rem' }}>Chart not available</div>
+            )}
+          </div>
+        ))}
+        {Object.keys(currentCharts).length === 0 && (
+          <div className="admin-empty" style={{ gridColumn: '1 / -1' }}>
+            No chart data available. Send some messages to the chatbot first.
+          </div>
+        )}
+      </div>
+
+      {/* ---- Top Queries Table ---- */}
+      <h3 className="admin-section-title" style={{ marginTop: '2rem' }}>Top Queries</h3>
       {topQueries.length > 0 ? (
         <div className="admin-table-wrapper">
           <table className="admin-table">
@@ -608,6 +763,422 @@ function AnalyticsTab() {
       ) : (
         <div className="admin-empty">No queries recorded yet.</div>
       )}
+
+      {/* ---- Unanswered Questions Table ---- */}
+      <h3 className="admin-section-title" style={{ marginTop: '2rem' }}>Unanswered Questions</h3>
+      {unanswered && unanswered.total_queries > 0 && (
+        <div className="admin-cards-row" style={{ marginBottom: '1rem' }}>
+          <div className="admin-card">
+            <div className="admin-card-label">Unanswered</div>
+            <div className="admin-card-value">{unanswered.total_unanswered}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Total Queries</div>
+            <div className="admin-card-value">{unanswered.total_queries}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Unanswered Rate</div>
+            <div className="admin-card-value">
+              {unanswered.total_queries > 0
+                ? `${((unanswered.total_unanswered / unanswered.total_queries) * 100).toFixed(1)}%`
+                : '0%'}
+            </div>
+          </div>
+        </div>
+      )}
+      <p className="admin-info-note">
+        These are questions the chatbot could not answer. Consider adding relevant FAQs or
+        database entries to cover these topics, then re-index.
+      </p>
+      {unanswered?.queries?.length > 0 ? (
+        <div className="admin-table-wrapper">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Question</th>
+                <th>Times Asked</th>
+                <th>Language</th>
+                <th>Best FAQ Score</th>
+                <th>Best DB Score</th>
+                <th>Last Asked</th>
+              </tr>
+            </thead>
+            <tbody>
+              {unanswered.queries.map((q, i) => (
+                <tr key={i}>
+                  <td>{i + 1}</td>
+                  <td className="admin-td-text" dir="auto">{q.query}</td>
+                  <td>{q.count}</td>
+                  <td>{q.language === 'ar' ? 'Arabic' : 'English'}</td>
+                  <td>{(q.faq_top_score * 100).toFixed(0)}%</td>
+                  <td>{(q.db_top_score * 100).toFixed(0)}%</td>
+                  <td className="admin-td-text admin-card-value-small">{q.last_asked ? q.last_asked.slice(0, 10) : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="admin-empty">No unanswered questions recorded yet.</div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Conversations & Feedback Tab
+// ---------------------------------------------------------------------------
+function ConversationsTab() {
+  const [conversations, setConversations] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState(null); // null, 'positive', 'negative', 'unreviewed'
+  const [stats, setStats] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  // Expanded row state
+  const [expandedId, setExpandedId] = useState(null);
+
+  // Feedback form state
+  const [feedbackTarget, setFeedbackTarget] = useState(null); // conversation being reviewed
+  const [feedbackRating, setFeedbackRating] = useState(null);
+  const [correctedAnswer, setCorrectedAnswer] = useState('');
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const LIMIT = 20;
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [convData, statsData] = await Promise.all([
+        getConversations(offset, LIMIT, filter),
+        getFeedbackStats(),
+      ]);
+      setConversations(convData.conversations || []);
+      setTotal(convData.total || 0);
+      setStats(statsData);
+    } catch (err) {
+      setToast({ message: `Failed to load conversations: ${err.message}`, type: 'error' });
+    } finally {
+      setLoading(false);
+    }
+  }, [offset, filter]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  useEffect(() => {
+    setOffset(0);
+    setExpandedId(null);
+  }, [filter]);
+
+  const openFeedbackForm = (conv, rating) => {
+    setFeedbackTarget(conv);
+    setFeedbackRating(rating);
+    setCorrectedAnswer('');
+    setFeedbackComment('');
+  };
+
+  const closeFeedbackForm = () => {
+    setFeedbackTarget(null);
+    setFeedbackRating(null);
+    setCorrectedAnswer('');
+    setFeedbackComment('');
+  };
+
+  const handleSubmitFeedback = async () => {
+    if (!feedbackTarget) return;
+    if (feedbackRating === -1 && !correctedAnswer.trim() && !feedbackComment.trim()) {
+      setToast({ message: 'Please provide a corrected answer or comment for negative feedback.', type: 'error' });
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await submitFeedback(
+        feedbackTarget.id,
+        feedbackRating,
+        correctedAnswer.trim() || null,
+        feedbackComment.trim() || null,
+      );
+      setToast({
+        message: feedbackRating === 1 ? 'Marked as good answer.' : 'Feedback submitted. The corrected answer will be used for similar future queries.',
+        type: 'success',
+      });
+      closeFeedbackForm();
+      await loadData();
+    } catch (err) {
+      setToast({ message: `Failed to submit feedback: ${err.message}`, type: 'error' });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleQuickThumbsUp = async (conv) => {
+    try {
+      await submitFeedback(conv.id, 1, null, null);
+      setToast({ message: 'Marked as good answer.', type: 'success' });
+      await loadData();
+    } catch (err) {
+      setToast({ message: `Failed: ${err.message}`, type: 'error' });
+    }
+  };
+
+  const totalPages = Math.ceil(total / LIMIT);
+  const currentPage = Math.floor(offset / LIMIT) + 1;
+
+  const formatDate = (ts) => {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const getRatingBadge = (conv) => {
+    if (conv.rating === 1) return <span className="conv-badge conv-badge-positive">Good</span>;
+    if (conv.rating === -1) return <span className="conv-badge conv-badge-negative">Needs Fix</span>;
+    return <span className="conv-badge conv-badge-unreviewed">Unreviewed</span>;
+  };
+
+  return (
+    <div className="admin-tab-content">
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+
+      {/* Stats Cards */}
+      {stats && (
+        <div className="admin-cards-row">
+          <div className="admin-card">
+            <div className="admin-card-label">Total Conversations</div>
+            <div className="admin-card-value">{stats.total_conversations}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Reviewed</div>
+            <div className="admin-card-value">{stats.total_reviewed}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Positive</div>
+            <div className="admin-card-value" style={{ color: '#2e7d32' }}>{stats.positive}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Negative</div>
+            <div className="admin-card-value" style={{ color: '#c62828' }}>{stats.negative}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Unreviewed</div>
+            <div className="admin-card-value">{stats.unreviewed}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">With Corrections</div>
+            <div className="admin-card-value">{stats.with_corrections}</div>
+          </div>
+        </div>
+      )}
+
+      <p className="admin-info-note">
+        Review chatbot conversations and provide feedback. Negative feedback with a corrected answer
+        will be used to improve responses for similar future questions.
+      </p>
+
+      {/* Filter Tabs */}
+      <div className="admin-collection-tabs">
+        {[
+          { key: null, label: 'All' },
+          { key: 'unreviewed', label: 'Unreviewed' },
+          { key: 'positive', label: 'Positive' },
+          { key: 'negative', label: 'Negative' },
+        ].map((f) => (
+          <button
+            key={f.key || 'all'}
+            className={`admin-collection-tab ${filter === f.key ? 'active' : ''}`}
+            onClick={() => setFilter(f.key)}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="admin-loading">Loading conversations...</div>
+      ) : (
+        <>
+          <div className="admin-table-info">
+            Showing {conversations.length} of {total} conversations (page {currentPage} of {totalPages || 1})
+          </div>
+
+          <div className="admin-table-wrapper">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th style={{ width: '50px' }}>#</th>
+                  <th>Question</th>
+                  <th>Answer</th>
+                  <th>Source</th>
+                  <th>Lang</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {conversations.map((conv) => (
+                  <React.Fragment key={conv.id}>
+                    <tr
+                      className={`conv-row ${expandedId === conv.id ? 'conv-row-expanded' : ''}`}
+                      onClick={() => setExpandedId(expandedId === conv.id ? null : conv.id)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <td className="admin-td-id">{conv.id}</td>
+                      <td>
+                        <span className="admin-td-text" dir="auto">{conv.query}</span>
+                      </td>
+                      <td>
+                        <span className="admin-td-text admin-td-truncate" dir="auto">
+                          {conv.answer ? conv.answer.substring(0, 120) + (conv.answer.length > 120 ? '...' : '') : ''}
+                        </span>
+                      </td>
+                      <td className="conv-source-cell">
+                        <span className="conv-source-tag">{conv.chosen_source || 'N/A'}</span>
+                      </td>
+                      <td>{conv.language === 'ar' ? 'AR' : 'EN'}</td>
+                      <td>{getRatingBadge(conv)}</td>
+                      <td className="admin-card-value-small">{formatDate(conv.created_at)}</td>
+                      <td className="admin-td-actions" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          className={`conv-thumb-btn conv-thumb-up ${conv.rating === 1 ? 'conv-thumb-active' : ''}`}
+                          title="Good answer"
+                          onClick={() => handleQuickThumbsUp(conv)}
+                        >
+                          &#x1F44D;
+                        </button>
+                        <button
+                          className={`conv-thumb-btn conv-thumb-down ${conv.rating === -1 ? 'conv-thumb-active' : ''}`}
+                          title="Needs correction"
+                          onClick={() => openFeedbackForm(conv, -1)}
+                        >
+                          &#x1F44E;
+                        </button>
+                      </td>
+                    </tr>
+
+                    {/* Expanded Row */}
+                    {expandedId === conv.id && (
+                      <tr className="conv-expanded-row">
+                        <td colSpan={8}>
+                          <div className="conv-expanded-content">
+                            <div className="conv-detail-section">
+                              <h4>Question</h4>
+                              <p dir="auto">{conv.query}</p>
+                            </div>
+                            <div className="conv-detail-section">
+                              <h4>Full Answer</h4>
+                              <p dir="auto" className="conv-full-answer">{conv.answer}</p>
+                            </div>
+                            <div className="conv-detail-meta">
+                              <span>Source: <strong>{conv.chosen_source || 'N/A'}</strong></span>
+                              <span>FAQ Score: <strong>{(conv.faq_top_score * 100).toFixed(0)}%</strong></span>
+                              <span>DB Score: <strong>{(conv.db_top_score * 100).toFixed(0)}%</strong></span>
+                              <span>Library Score: <strong>{(conv.library_top_score * 100).toFixed(0)}%</strong></span>
+                              <span>Response Time: <strong>{conv.response_time_ms?.toFixed(0)}ms</strong></span>
+                            </div>
+                            {conv.corrected_answer && (
+                              <div className="conv-detail-section conv-correction-section">
+                                <h4>Admin Corrected Answer</h4>
+                                <p dir="auto">{conv.corrected_answer}</p>
+                                {conv.comment && <p className="conv-comment"><em>Comment: {conv.comment}</em></p>}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                {conversations.length === 0 && (
+                  <tr><td colSpan={8} className="admin-empty">No conversations found.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div className="admin-pagination">
+              <button
+                className="admin-btn admin-btn-sm admin-btn-secondary"
+                disabled={offset === 0}
+                onClick={() => setOffset(Math.max(0, offset - LIMIT))}
+              >
+                Previous
+              </button>
+              <span className="admin-page-info">Page {currentPage} of {totalPages}</span>
+              <button
+                className="admin-btn admin-btn-sm admin-btn-secondary"
+                disabled={offset + LIMIT >= total}
+                onClick={() => setOffset(offset + LIMIT)}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Feedback Modal */}
+      {feedbackTarget && (
+        <div className="conv-modal-overlay" onClick={closeFeedbackForm}>
+          <div className="conv-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="conv-modal-title">
+              {feedbackRating === -1 ? 'Provide Correction' : 'Confirm Positive Feedback'}
+            </h3>
+
+            <div className="conv-modal-section">
+              <label>Original Question:</label>
+              <p dir="auto" className="conv-modal-text">{feedbackTarget.query}</p>
+            </div>
+
+            <div className="conv-modal-section">
+              <label>Chatbot Answer:</label>
+              <p dir="auto" className="conv-modal-text">{feedbackTarget.answer?.substring(0, 500)}</p>
+            </div>
+
+            {feedbackRating === -1 && (
+              <>
+                <div className="admin-form-group">
+                  <label>What should the correct answer be?</label>
+                  <textarea
+                    value={correctedAnswer}
+                    onChange={(e) => setCorrectedAnswer(e.target.value)}
+                    rows={5}
+                    placeholder="Type the correct answer that the chatbot should give for this question..."
+                  />
+                </div>
+                <div className="admin-form-group">
+                  <label>Additional comment (optional)</label>
+                  <textarea
+                    value={feedbackComment}
+                    onChange={(e) => setFeedbackComment(e.target.value)}
+                    rows={2}
+                    placeholder="Any notes about why this answer was wrong..."
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="conv-modal-actions">
+              <button
+                className="admin-btn admin-btn-primary"
+                onClick={handleSubmitFeedback}
+                disabled={submitting}
+              >
+                {submitting ? 'Submitting...' : 'Submit Feedback'}
+              </button>
+              <button className="admin-btn admin-btn-secondary" onClick={closeFeedbackForm}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -619,7 +1190,7 @@ function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('status');
 
   return (
-    <div className="app-container" dir="ltr" lang="en">
+    <div className="app-container admin-page" dir="ltr" lang="en">
       <Header />
 
       <div className="admin-dashboard">
@@ -646,11 +1217,18 @@ function AdminDashboard() {
           >
             Analytics
           </button>
+          <button
+            className={`admin-tab ${activeTab === 'conversations' ? 'active' : ''}`}
+            onClick={() => setActiveTab('conversations')}
+          >
+            Conversations
+          </button>
         </div>
 
         {activeTab === 'status' && <SystemStatusTab />}
         {activeTab === 'data' && <DataManagementTab />}
         {activeTab === 'analytics' && <AnalyticsTab />}
+        {activeTab === 'conversations' && <ConversationsTab />}
       </div>
 
       <Footer />

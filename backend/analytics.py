@@ -6,7 +6,7 @@ Chat logging and analytics computation for the admin dashboard.
 import json
 import os
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -31,10 +31,20 @@ class ChatLogger:
         faq_top_score: float,
         db_top_score: float,
         library_top_score: float,
+        cache_hit: bool = False,
+        response_time_ms: float = 0.0,
+        query_word_count: int = 0,
+        keyword_intent_fired: bool = False,
+        sources_above_threshold: int = 0,
+        top_faq_question: str = "",
+        top_db_name: str = "",
+        generated_answer: str = "",
+        retrieved_chunks: Optional[list] = None,
     ) -> None:
         """Append a log entry. Non-blocking best-effort write."""
+        now = datetime.utcnow()
         entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": now.isoformat() + "Z",
             "query": query,
             "language": language,
             "intent_source": intent_source,
@@ -42,6 +52,17 @@ class ChatLogger:
             "faq_top_score": round(faq_top_score, 4),
             "db_top_score": round(db_top_score, 4),
             "library_top_score": round(library_top_score, 4),
+            "cache_hit": cache_hit,
+            "response_time_ms": round(response_time_ms, 1),
+            "query_word_count": query_word_count,
+            "keyword_intent_fired": keyword_intent_fired,
+            "sources_above_threshold": sources_above_threshold,
+            "top_faq_question": top_faq_question,
+            "top_db_name": top_db_name,
+            "hour_of_day": now.hour,
+            "day_of_week": now.weekday(),
+            "generated_answer": generated_answer,
+            "retrieved_chunks": retrieved_chunks or [],
         }
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
@@ -126,7 +147,6 @@ class AnalyticsComputer:
         def _avg(lst):
             return round(sum(lst) / len(lst), 4) if lst else 0.0
 
-        # Convert counters to percentage dicts
         lang_dist = {}
         for lang, count in lang_counter.items():
             lang_dist[lang] = round(count / total * 100, 1)
@@ -156,11 +176,10 @@ class AnalyticsComputer:
         daily = Counter()
         for e in entries:
             ts = e.get("timestamp", "")
-            date_str = ts[:10]  # "YYYY-MM-DD"
+            date_str = ts[:10]
             if date_str >= cutoff:
                 daily[date_str] += 1
 
-        # Build full date range so every day appears even with 0 count
         result = []
         for i in range(days, -1, -1):
             day = (now - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -188,3 +207,128 @@ class AnalyticsComputer:
                 "last_asked": last_seen.get(query, ""),
             })
         return result
+
+    def unanswered_queries(self, limit: int = 50) -> dict:
+        """Return queries the bot could not answer (intent_source = 'none (unclear)')."""
+        entries = self._read_logs()
+        total_queries = len(entries)
+
+        unanswered = [e for e in entries if e.get("intent_source") == "none (unclear)"]
+        total_unanswered = len(unanswered)
+
+        query_data = {}
+        for e in unanswered:
+            q = e.get("query", "").strip()
+            q_lower = q.lower()
+            if not q_lower:
+                continue
+
+            if q_lower not in query_data:
+                query_data[q_lower] = {
+                    "query": q,
+                    "count": 0,
+                    "last_asked": "",
+                    "language": e.get("language", "en"),
+                    "faq_top_score": 0.0,
+                    "db_top_score": 0.0,
+                    "library_top_score": 0.0,
+                }
+
+            query_data[q_lower]["count"] += 1
+            ts = e.get("timestamp", "")
+            if ts > query_data[q_lower]["last_asked"]:
+                query_data[q_lower]["last_asked"] = ts
+                query_data[q_lower]["faq_top_score"] = e.get("faq_top_score", 0.0)
+                query_data[q_lower]["db_top_score"] = e.get("db_top_score", 0.0)
+                query_data[q_lower]["library_top_score"] = e.get("library_top_score", 0.0)
+                query_data[q_lower]["language"] = e.get("language", "en")
+
+        sorted_queries = sorted(
+            query_data.values(),
+            key=lambda x: (-x["count"], x["last_asked"]),
+        )[:limit]
+
+        return {
+            "total_unanswered": total_unanswered,
+            "total_queries": total_queries,
+            "queries": sorted_queries,
+        }
+
+    # ------------------------------------------------------------------
+    # Extended analytics for the charts dashboard
+    # ------------------------------------------------------------------
+
+    def compute_extended_summary(self) -> dict:
+        """Compute extended summary stats for the charts dashboard."""
+        entries = self._read_logs()
+        if not entries:
+            return {
+                "total_entries": 0,
+                "estimated_sessions": 0,
+                "avg_queries_per_session": 0,
+                "avg_response_time_ms": 0,
+                "p95_response_time_ms": 0,
+                "cache_hit_rate": 0,
+                "unanswered_rate": 0,
+                "avg_query_word_count": 0,
+            }
+
+        # Session estimation (>5 min gap = new session)
+        timestamps = []
+        for e in entries:
+            ts = e.get("timestamp", "")
+            if ts:
+                try:
+                    timestamps.append(datetime.fromisoformat(ts.rstrip("Z")))
+                except ValueError:
+                    continue
+        timestamps.sort()
+
+        sessions = 1
+        for i in range(1, len(timestamps)):
+            if (timestamps[i] - timestamps[i - 1]).total_seconds() > 300:
+                sessions += 1
+
+        response_times = [
+            e.get("response_time_ms", 0)
+            for e in entries
+            if e.get("response_time_ms", 0) > 0
+        ]
+        avg_rt = sum(response_times) / len(response_times) if response_times else 0
+        p95_rt = 0
+        if response_times:
+            sorted_rt = sorted(response_times)
+            p95_rt = sorted_rt[min(int(len(sorted_rt) * 0.95), len(sorted_rt) - 1)]
+
+        cache_hits = sum(1 for e in entries if e.get("cache_hit"))
+        unanswered = sum(
+            1 for e in entries if e.get("intent_source") == "none (unclear)"
+        )
+
+        word_counts = [e.get("query_word_count", 0) for e in entries]
+        avg_wc = sum(word_counts) / len(word_counts) if word_counts else 0
+
+        return {
+            "total_entries": len(entries),
+            "estimated_sessions": sessions,
+            "avg_queries_per_session": round(len(entries) / sessions, 1)
+            if sessions
+            else 0,
+            "avg_response_time_ms": round(avg_rt, 1),
+            "p95_response_time_ms": round(p95_rt, 1),
+            "cache_hit_rate": round(cache_hits / len(entries) * 100, 1)
+            if entries
+            else 0,
+            "unanswered_rate": round(unanswered / len(entries) * 100, 1)
+            if entries
+            else 0,
+            "avg_query_word_count": round(avg_wc, 1),
+        }
+
+    def compute_charts(self) -> dict:
+        """Generate all analytics charts as base64 PNGs."""
+        from .chart_generator import ChartGenerator
+
+        entries = self._read_logs()
+        generator = ChartGenerator(entries)
+        return generator.generate_all()

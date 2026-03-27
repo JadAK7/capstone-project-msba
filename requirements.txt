@@ -1,6 +1,5 @@
 # Core
 openai>=1.12.0
-chromadb>=0.4.0
 python-dotenv>=1.0.0
 
 # Data processing
@@ -10,6 +9,14 @@ pandas>=2.0.0
 fastapi>=0.104.0
 uvicorn>=0.24.0
 
-# Scraping (optional -- only needed for scrape_aub_library.py)
-playwright>=1.40.0
+# Database (PostgreSQL + pgvector)
+psycopg2-binary>=2.9.9
+pgvector>=0.3.0
+numpy>=1.24.0
+
+# Analytics / Visualization
+matplotlib>=3.7.0
+
+# Scraping (optional -- install separately for scrape_aub_library.py)
+# pip install playwright tqdm && playwright install chromium
 tqdm>=4.66.0
