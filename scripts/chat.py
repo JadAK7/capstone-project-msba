@@ -1,6 +1,6 @@
 """
 chat.py
-Library Chatbot with FAQ answers and database recommendations.
+Library Chatbot.
 Uses PostgreSQL + pgvector for vector storage and similarity search.
 Supports Arabic and English (bilingual).
 """

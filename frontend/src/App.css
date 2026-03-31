@@ -319,6 +319,126 @@ html, body {
   text-decoration: underline;
 }
 
+/* Chat feedback buttons (thumbs up/down on bot messages) */
+.message-feedback {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.feedback-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 3px 6px;
+  cursor: pointer;
+  color: #999;
+  display: flex;
+  align-items: center;
+  transition: all 0.15s ease;
+}
+
+.feedback-btn:hover:not(:disabled) {
+  color: var(--maroon-primary);
+  border-color: var(--maroon-primary);
+  background: rgba(132, 1, 50, 0.05);
+}
+
+.feedback-btn.active {
+  color: var(--maroon-primary);
+  border-color: var(--maroon-primary);
+  background: rgba(132, 1, 50, 0.1);
+}
+
+.feedback-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Feedback form (appears after thumbs down) */
+.feedback-form {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.feedback-form-label {
+  font-size: 0.82rem;
+  color: #555;
+  margin: 0 0 6px 0;
+  font-weight: 500;
+}
+
+.feedback-form-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.feedback-form-input:focus {
+  outline: none;
+  border-color: var(--maroon-primary);
+}
+
+.feedback-form-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.feedback-form-submit {
+  background: var(--maroon-primary);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 14px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.feedback-form-submit:hover:not(:disabled) {
+  background: var(--maroon-dark);
+}
+
+.feedback-form-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.feedback-form-skip,
+.feedback-form-cancel {
+  background: none;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: #666;
+}
+
+.feedback-form-skip:hover,
+.feedback-form-cancel:hover {
+  border-color: #999;
+  color: #333;
+}
+
+.feedback-thanks {
+  font-size: 0.78rem;
+  color: #888;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
 .message-content code {
   background-color: #f5f5f5;
   padding: 0.2rem 0.4rem;
@@ -1074,6 +1194,20 @@ html, body {
   gap: 0.5rem;
 }
 
+.admin-btn-loading::before {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* Collection Sub-tabs */
 .admin-collection-tabs {
   display: flex;
@@ -1343,6 +1477,82 @@ html, body {
   color: var(--text-gray);
   opacity: 0.8;
   line-height: 1.4;
+}
+
+.admin-chunk-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: #f0e6eb;
+  color: var(--maroon);
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.admin-td-center {
+  text-align: center;
+}
+
+/* Chunk search bar */
+.chunk-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.chunk-search-input {
+  flex: 1;
+  max-width: 400px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.chunk-search-input:focus {
+  border-color: var(--maroon);
+}
+
+/* Expandable chunk text */
+.chunk-text-cell {
+  max-width: 350px;
+  font-size: 0.82rem;
+  color: var(--text-gray);
+  line-height: 1.5;
+}
+
+.chunk-text-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chunk-text-expanded .chunk-text-content {
+  display: block;
+  max-height: 400px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.chunk-expand-btn {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--maroon);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.chunk-expand-btn:hover {
+  color: var(--accent-red);
 }
 
 /* Reindex footer in Data Management */
@@ -1835,6 +2045,42 @@ html, body {
   color: #795548;
 }
 
+/* Resolve button for user feedback */
+.admin-btn-resolve {
+  background: #e65100;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.admin-btn-resolve:hover {
+  background: #bf360c;
+}
+
+/* User comment highlight in feedback modal */
+.conv-user-comment-section {
+  background: #fff3e0;
+  border: 1px solid #ffcc80;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.conv-user-comment-section label {
+  color: #e65100;
+  font-weight: 600;
+}
+
+.conv-user-comment {
+  font-style: italic;
+  color: #bf360c;
+}
+
 /* Feedback Modal */
 .conv-modal-overlay {
   position: fixed;
@@ -1920,5 +2166,164 @@ html, body {
   .conv-thumb-btn {
     padding: 0.25rem 0.4rem;
     font-size: 0.9rem;
+  }
+}
+
+/* =============================== */
+/* Evaluation Tab Styles            */
+/* =============================== */
+
+/* Grounding Score Hero Card */
+.eval-grounding-card {
+  background: linear-gradient(135deg, #840132 0%, #6b0129 100%);
+  color: white;
+  border-radius: 12px;
+  padding: 1.5rem 2rem;
+  text-align: center;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 12px rgba(132, 1, 50, 0.25);
+}
+
+.eval-grounding-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  opacity: 0.85;
+  margin-bottom: 0.5rem;
+}
+
+.eval-grounding-value {
+  font-size: 3.5rem;
+  font-weight: 800;
+  line-height: 1;
+  margin-bottom: 0.5rem;
+}
+
+.eval-grounding-sub {
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+
+/* Metrics Panel */
+.eval-metrics-panel {
+  background: var(--background-white);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Score Row */
+.eval-score-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.eval-score-label {
+  width: 200px;
+  flex-shrink: 0;
+}
+
+.eval-score-name {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-gray);
+}
+
+.eval-score-desc {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-gray);
+  opacity: 0.6;
+}
+
+.eval-bar-track {
+  flex: 1;
+  height: 22px;
+  background-color: #f0f0f0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.eval-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s ease;
+  min-width: 2px;
+}
+
+.eval-score-value {
+  width: 48px;
+  text-align: right;
+  font-size: 0.95rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* Per-question cell scores */
+.eval-cell-score {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+/* Running hint */
+.eval-running-hint {
+  font-size: 0.82rem;
+  color: var(--text-gray);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Reasons Grid (expanded row) */
+.eval-reasons-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.eval-reason-card {
+  background: white;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.eval-reason-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+  font-size: 0.82rem;
+}
+
+.eval-reason-text {
+  font-size: 0.78rem;
+  color: var(--text-gray);
+  line-height: 1.4;
+  margin: 0;
+}
+
+@media (max-width: 768px) {
+  .eval-grounding-value {
+    font-size: 2.5rem;
+  }
+
+  .eval-score-row {
+    flex-wrap: wrap;
+  }
+
+  .eval-score-label {
+    width: 100%;
+  }
+
+  .eval-reasons-grid {
+    grid-template-columns: 1fr;
   }
 }

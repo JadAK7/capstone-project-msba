@@ -14,8 +14,9 @@ from .embeddings import embed_text
 
 logger = logging.getLogger(__name__)
 
-# Track last index build time (in-memory; resets on server restart)
+# Track last index build / scrape times (in-memory; resets on server restart)
 _last_index_build_time: Optional[float] = None
+_last_scrape_time: Optional[float] = None
 _server_start_time: float = time.time()
 
 
@@ -27,6 +28,16 @@ def set_last_index_build_time(ts: Optional[float] = None):
 
 def get_last_index_build_time() -> Optional[float]:
     return _last_index_build_time
+
+
+def set_last_scrape_time(ts: Optional[float] = None):
+    """Record when the library website was last scraped."""
+    global _last_scrape_time
+    _last_scrape_time = ts or time.time()
+
+
+def get_last_scrape_time() -> Optional[float]:
+    return _last_scrape_time
 
 
 def get_server_start_time() -> float:
@@ -47,6 +58,10 @@ _TABLE_META = {
         "table": "library_pages",
         "metadata_cols": ["url", "title", "content"],
     },
+    "document_chunks": {
+        "table": "document_chunks",
+        "metadata_cols": ["page_url", "page_title", "section_title", "page_type", "chunk_index"],
+    },
 }
 
 
@@ -65,7 +80,7 @@ class AdminManager:
         results = []
         with get_connection() as conn:
             with conn.cursor() as cur:
-                for name in [Config.FAQ_COLLECTION, Config.DB_COLLECTION, Config.LIBRARY_COLLECTION]:
+                for name in [Config.FAQ_COLLECTION, Config.DB_COLLECTION, Config.LIBRARY_COLLECTION, "document_chunks"]:
                     table = _TABLE_META[name]["table"]
                     try:
                         cur.execute(f"SELECT COUNT(*) FROM {table}")
@@ -93,9 +108,10 @@ class AdminManager:
                 if total == 0:
                     return {"entries": [], "total": 0, "offset": offset, "limit": limit}
 
+                doc_col = "chunk_text" if table == "document_chunks" else "document"
                 cols = ", ".join(metadata_cols)
                 cur.execute(
-                    f"SELECT id, document, {cols} FROM {table} ORDER BY id LIMIT %s OFFSET %s",
+                    f"SELECT id, {doc_col}, {cols} FROM {table} ORDER BY id LIMIT %s OFFSET %s",
                     (limit, offset),
                 )
                 rows = cur.fetchall()
@@ -264,6 +280,7 @@ class AdminManager:
             "embedding_model": Config.EMBEDDING_MODEL,
             "database": "PostgreSQL + pgvector",
             "last_index_build": get_last_index_build_time(),
+            "last_scrape": get_last_scrape_time(),
             "server_start_time": get_server_start_time(),
             "server_uptime_seconds": time.time() - get_server_start_time(),
         }

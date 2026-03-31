@@ -11,6 +11,8 @@ import {
   updateDatabase,
   deleteDatabase,
   deleteLibraryPage,
+  deleteDocumentChunk,
+  searchDocumentChunks,
   triggerReindex,
   triggerRescrape,
   getRescrapeStatus,
@@ -19,9 +21,9 @@ import {
   getAnalyticsSummary,
   getAnalyticsTrends,
   getTopQueries,
-  getUnansweredQueries,
   getAnalyticsCharts,
   getConversations,
+  deleteConversation,
   submitFeedback,
   getFeedbackStats,
 } from '../api';
@@ -46,13 +48,11 @@ function Toast({ message, type, onClose }) {
 // ---------------------------------------------------------------------------
 // System Status Tab
 // ---------------------------------------------------------------------------
-function SystemStatusTab() {
+function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
   const [health, setHealth] = useState(null);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [reindexing, setReindexing] = useState(false);
-  const [scraping, setScraping] = useState(false);
-  const [scrapeMessage, setScrapeMessage] = useState('');
   const [toast, setToast] = useState(null);
 
   const loadData = useCallback(async () => {
@@ -70,6 +70,15 @@ function SystemStatusTab() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Reload system info when scraping finishes (to update "Last Scrape" timestamp)
+  const prevScraping = React.useRef(scraping);
+  useEffect(() => {
+    if (prevScraping.current && !scraping) {
+      loadData();
+    }
+    prevScraping.current = scraping;
+  }, [scraping, loadData]);
+
   const handleReindex = async () => {
     if (!window.confirm('This will rebuild all collections from CSV source files. Continue?')) return;
     setReindexing(true);
@@ -81,39 +90,6 @@ function SystemStatusTab() {
       setToast({ message: `Re-index failed: ${err.message}`, type: 'error' });
     } finally {
       setReindexing(false);
-    }
-  };
-
-  const handleRescrape = async () => {
-    if (!window.confirm('This will re-scrape the AUB library website and rebuild the library pages index. This may take several minutes. Continue?')) return;
-    setScraping(true);
-    setScrapeMessage('Starting scrape...');
-    try {
-      await triggerRescrape();
-      // Poll for status
-      const poll = setInterval(async () => {
-        try {
-          const status = await getRescrapeStatus();
-          setScrapeMessage(status.message || 'Scraping...');
-          if (!status.running) {
-            clearInterval(poll);
-            setScraping(false);
-            if (status.error) {
-              setToast({ message: `Scrape failed: ${status.error}`, type: 'error' });
-            } else {
-              setToast({ message: status.message || 'Scraping completed successfully.', type: 'success' });
-              await loadData();
-            }
-          }
-        } catch {
-          clearInterval(poll);
-          setScraping(false);
-          setToast({ message: 'Lost connection while checking scrape status.', type: 'error' });
-        }
-      }, 3000);
-    } catch (err) {
-      setScraping(false);
-      setToast({ message: `Scrape failed: ${err.message}`, type: 'error' });
     }
   };
 
@@ -137,12 +113,6 @@ function SystemStatusTab() {
 
       <div className="admin-cards-row">
         <div className="admin-card">
-          <div className="admin-card-label">Backend Status</div>
-          <div className={`admin-status-badge ${health?.status === 'ok' ? 'status-healthy' : 'status-down'}`}>
-            {health?.status === 'ok' ? 'Healthy' : 'Down'}
-          </div>
-        </div>
-        <div className="admin-card">
           <div className="admin-card-label">Server Uptime</div>
           <div className="admin-card-value">{formatUptime(systemInfo?.server_uptime_seconds)}</div>
         </div>
@@ -153,6 +123,10 @@ function SystemStatusTab() {
         <div className="admin-card">
           <div className="admin-card-label">Last Index Build</div>
           <div className="admin-card-value admin-card-value-small">{formatTimestamp(systemInfo?.last_index_build)}</div>
+        </div>
+        <div className="admin-card">
+          <div className="admin-card-label">Last Scrape</div>
+          <div className="admin-card-value admin-card-value-small">{formatTimestamp(systemInfo?.last_scrape)}</div>
         </div>
       </div>
 
@@ -181,7 +155,7 @@ function SystemStatusTab() {
         </button>
         <button
           className="admin-btn admin-btn-primary"
-          onClick={handleRescrape}
+          onClick={onRescrape}
           disabled={scraping || reindexing}
         >
           {scraping ? (
@@ -201,7 +175,7 @@ function SystemStatusTab() {
 // ---------------------------------------------------------------------------
 // Data Management Tab
 // ---------------------------------------------------------------------------
-function DataManagementTab() {
+function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
   const [activeCollection, setActiveCollection] = useState('faq');
   const [entries, setEntries] = useState([]);
   const [total, setTotal] = useState(0);
@@ -210,6 +184,11 @@ function DataManagementTab() {
   const [toast, setToast] = useState(null);
 
   const [reindexing, setReindexing] = useState(false);
+
+  // Document chunks: search + expandable text
+  const [chunkSearch, setChunkSearch] = useState('');
+  const [chunkSearchActive, setChunkSearchActive] = useState(false);
+  const [expandedChunks, setExpandedChunks] = useState(new Set());
 
   // Add/Edit form state
   const [showAddForm, setShowAddForm] = useState(false);
@@ -222,7 +201,12 @@ function DataManagementTab() {
   const loadEntries = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await getCollectionEntries(activeCollection, offset, LIMIT);
+      let data;
+      if (activeCollection === 'document_chunks' && chunkSearchActive && chunkSearch.trim()) {
+        data = await searchDocumentChunks(chunkSearch.trim(), offset, LIMIT);
+      } else {
+        data = await getCollectionEntries(activeCollection, offset, LIMIT);
+      }
       setEntries(data.entries || []);
       setTotal(data.total || 0);
     } catch (err) {
@@ -230,12 +214,15 @@ function DataManagementTab() {
     } finally {
       setLoading(false);
     }
-  }, [activeCollection, offset]);
+  }, [activeCollection, offset, chunkSearchActive, chunkSearch]);
 
   useEffect(() => {
     setOffset(0);
     setShowAddForm(false);
     setEditingId(null);
+    setChunkSearch('');
+    setChunkSearchActive(false);
+    setExpandedChunks(new Set());
   }, [activeCollection]);
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
@@ -294,6 +281,8 @@ function DataManagementTab() {
         await deleteDatabase(id);
       } else if (activeCollection === 'library_pages') {
         await deleteLibraryPage(id);
+      } else if (activeCollection === 'document_chunks') {
+        await deleteDocumentChunk(id);
       }
       setToast({ message: 'Entry deleted successfully.', type: 'success' });
       await loadEntries();
@@ -328,25 +317,34 @@ function DataManagementTab() {
     }
   };
 
+  // Reload entries when scraping finishes
+  const prevScraping = React.useRef(scraping);
+  useEffect(() => {
+    if (prevScraping.current && !scraping) {
+      loadEntries();
+    }
+    prevScraping.current = scraping;
+  }, [scraping, loadEntries]);
+
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
   const field1Label = activeCollection === 'faq' ? 'Question' : 'Name';
   const field2Label = activeCollection === 'faq' ? 'Answer' : 'Description';
-  const canEdit = activeCollection !== 'library_pages';
+  const canEdit = activeCollection !== 'library_pages' && activeCollection !== 'document_chunks';
 
   return (
     <div className="admin-tab-content">
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
 
       <div className="admin-collection-tabs">
-        {['faq', 'databases', 'library_pages'].map((name) => (
+        {['faq', 'databases', 'library_pages', 'document_chunks'].map((name) => (
           <button
             key={name}
             className={`admin-collection-tab ${activeCollection === name ? 'active' : ''}`}
             onClick={() => setActiveCollection(name)}
           >
-            {name === 'faq' ? 'FAQs' : name === 'databases' ? 'Databases' : 'Library Pages'}
+            {name === 'faq' ? 'FAQs' : name === 'databases' ? 'Databases' : name === 'library_pages' ? 'Library Pages' : 'Document Chunks'}
           </button>
         ))}
       </div>
@@ -354,9 +352,86 @@ function DataManagementTab() {
       {activeCollection === 'library_pages' && (
         <div className="admin-info-note">
           Library pages are populated automatically by the web scraper. You can delete entries here
-          but cannot add or edit them manually. To refresh this data, use the
-          "Re-scrape Library Website" button on the System Status tab.
+          but cannot add or edit them manually.
+          <button
+            className="admin-btn admin-btn-primary admin-btn-sm"
+            style={{ marginLeft: '0.75rem' }}
+            onClick={onRescrape}
+            disabled={scraping || reindexing}
+          >
+            {scraping ? (
+              <span className="admin-btn-loading">Scraping...</span>
+            ) : (
+              'Re-scrape Library Website'
+            )}
+          </button>
+          {scraping && scrapeMessage && (
+            <div className="admin-scrape-status">{scrapeMessage}</div>
+          )}
         </div>
+      )}
+
+      {activeCollection === 'document_chunks' && (
+        <>
+          <div className="admin-info-note">
+            Document chunks are semantic segments extracted from scraped library pages. Each chunk contains
+            a portion of page content with metadata about its source page, section, and type.
+            <button
+              className="admin-btn admin-btn-primary admin-btn-sm"
+              style={{ marginLeft: '0.75rem' }}
+              onClick={onRescrape}
+              disabled={scraping || reindexing}
+            >
+              {scraping ? (
+                <span className="admin-btn-loading">Scraping...</span>
+              ) : (
+                'Re-scrape Library Website'
+              )}
+            </button>
+            {scraping && scrapeMessage && (
+              <div className="admin-scrape-status">{scrapeMessage}</div>
+            )}
+          </div>
+          <div className="chunk-search-bar">
+            <input
+              type="text"
+              className="chunk-search-input"
+              placeholder="Search chunk text..."
+              value={chunkSearch}
+              onChange={(e) => setChunkSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && chunkSearch.trim()) {
+                  setOffset(0);
+                  setChunkSearchActive(true);
+                }
+              }}
+            />
+            <button
+              className="admin-btn admin-btn-primary admin-btn-sm"
+              onClick={() => {
+                if (chunkSearch.trim()) {
+                  setOffset(0);
+                  setChunkSearchActive(true);
+                }
+              }}
+              disabled={!chunkSearch.trim()}
+            >
+              Search
+            </button>
+            {chunkSearchActive && (
+              <button
+                className="admin-btn admin-btn-secondary admin-btn-sm"
+                onClick={() => {
+                  setChunkSearch('');
+                  setChunkSearchActive(false);
+                  setOffset(0);
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </>
       )}
 
       {canEdit && (
@@ -401,7 +476,10 @@ function DataManagementTab() {
       ) : (
         <>
           <div className="admin-table-info">
-            Showing {entries.length} of {total} entries (page {currentPage} of {totalPages || 1})
+            {chunkSearchActive && activeCollection === 'document_chunks'
+              ? `Found ${total} chunks matching "${chunkSearch}" (page ${currentPage} of ${totalPages || 1})`
+              : `Showing ${entries.length} of ${total} entries (page ${currentPage} of ${totalPages || 1})`
+            }
           </div>
           <div className="admin-table-wrapper">
             <table className="admin-table">
@@ -411,6 +489,7 @@ function DataManagementTab() {
                   {activeCollection === 'faq' && <><th>Question</th><th>Answer</th></>}
                   {activeCollection === 'databases' && <><th>Name</th><th>Description</th></>}
                   {activeCollection === 'library_pages' && <><th>Title</th><th>URL</th><th>Content Preview</th></>}
+                  {activeCollection === 'document_chunks' && <><th>Page Title</th><th>Section</th><th>Type</th><th>Chunk #</th><th>Chunk Text</th></>}
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -502,6 +581,52 @@ function DataManagementTab() {
                         </>
                       )}
 
+                      {activeCollection === 'document_chunks' && (() => {
+                        const isExpanded = expandedChunks.has(entry.id);
+                        const text = entry.document || '';
+                        const isLong = text.length > 200;
+                        return (
+                          <>
+                            <td>
+                              <span className="admin-td-text">{entry.metadata?.page_title || ''}</span>
+                            </td>
+                            <td>
+                              <span className="admin-td-text">{entry.metadata?.section_title || '-'}</span>
+                            </td>
+                            <td>
+                              <span className="admin-chunk-type-badge">{entry.metadata?.page_type || 'general'}</span>
+                            </td>
+                            <td className="admin-td-center">{entry.metadata?.chunk_index ?? ''}</td>
+                            <td>
+                              <div className={`chunk-text-cell ${isExpanded ? 'chunk-text-expanded' : ''}`}>
+                                <span className="chunk-text-content">
+                                  {isExpanded ? text : (isLong ? text.substring(0, 200) + '...' : text)}
+                                </span>
+                                {isLong && (
+                                  <button
+                                    className="chunk-expand-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setExpandedChunks(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(entry.id)) {
+                                          next.delete(entry.id);
+                                        } else {
+                                          next.add(entry.id);
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                  >
+                                    {isExpanded ? 'Show less' : 'Show more'}
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </>
+                        );
+                      })()}
+
                       <td className="admin-td-actions">
                         {isEditing ? (
                           <>
@@ -521,7 +646,7 @@ function DataManagementTab() {
                   );
                 })}
                 {entries.length === 0 && (
-                  <tr><td colSpan={activeCollection === 'library_pages' ? 5 : 4} className="admin-empty">No entries found.</td></tr>
+                  <tr><td colSpan={activeCollection === 'document_chunks' ? 7 : activeCollection === 'library_pages' ? 5 : 4} className="admin-empty">No entries found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -573,23 +698,12 @@ function DataManagementTab() {
 // Analytics Tab (with matplotlib charts)
 // ---------------------------------------------------------------------------
 
-const CHART_SECTIONS = [
-  { key: 'usage_volume', label: 'Usage & Volume' },
-  { key: 'language', label: 'Language' },
-  { key: 'retrieval_quality', label: 'Retrieval Quality' },
-  { key: 'intent_routing', label: 'Intent & Routing' },
-  { key: 'query_analysis', label: 'Query Analysis' },
-  { key: 'performance', label: 'Performance' },
-  { key: 'knowledge_gaps', label: 'Knowledge Gaps' },
-];
 
 function AnalyticsTab() {
   const [summary, setSummary] = useState(null);
   const [topQueries, setTopQueries] = useState([]);
-  const [unanswered, setUnanswered] = useState(null);
   const [chartData, setChartData] = useState(null);
   const [extendedSummary, setExtendedSummary] = useState(null);
-  const [activeSection, setActiveSection] = useState('usage_volume');
   const [loading, setLoading] = useState(true);
   const [chartsLoading, setChartsLoading] = useState(false);
   const [toast, setToast] = useState(null);
@@ -598,15 +712,13 @@ function AnalyticsTab() {
     const load = async () => {
       setLoading(true);
       try {
-        const [s, q, u, c] = await Promise.all([
+        const [s, q, c] = await Promise.all([
           getAnalyticsSummary(),
           getTopQueries(),
-          getUnansweredQueries(),
           getAnalyticsCharts(),
         ]);
         setSummary(s);
         setTopQueries(q);
-        setUnanswered(u);
         setChartData(c.charts || {});
         setExtendedSummary(c.extended_summary || {});
       } catch (err) {
@@ -634,7 +746,15 @@ function AnalyticsTab() {
 
   if (loading) return <div className="admin-loading">Loading analytics...</div>;
 
-  const currentCharts = chartData?.[activeSection] || {};
+  // Flatten all charts from all sections into one list
+  const allCharts = [];
+  if (chartData) {
+    for (const [, sectionCharts] of Object.entries(chartData)) {
+      for (const [key, chart] of Object.entries(sectionCharts)) {
+        allCharts.push({ key, ...chart });
+      }
+    }
+  }
 
   return (
     <div className="admin-tab-content">
@@ -667,29 +787,9 @@ function AnalyticsTab() {
           <div className="admin-card-label">Avg Queries/Session</div>
           <div className="admin-card-value">{extendedSummary?.avg_queries_per_session || 0}</div>
         </div>
-        <div className="admin-card">
-          <div className="admin-card-label">Avg Response Time</div>
-          <div className="admin-card-value admin-card-value-small">
-            {extendedSummary?.avg_response_time_ms ? `${extendedSummary.avg_response_time_ms}ms` : 'N/A'}
-          </div>
-        </div>
-        <div className="admin-card">
-          <div className="admin-card-label">P95 Response Time</div>
-          <div className="admin-card-value admin-card-value-small">
-            {extendedSummary?.p95_response_time_ms ? `${extendedSummary.p95_response_time_ms}ms` : 'N/A'}
-          </div>
-        </div>
-        <div className="admin-card">
-          <div className="admin-card-label">Cache Hit Rate</div>
-          <div className="admin-card-value">{extendedSummary?.cache_hit_rate || 0}%</div>
-        </div>
-        <div className="admin-card">
-          <div className="admin-card-label">Unanswered Rate</div>
-          <div className="admin-card-value">{extendedSummary?.unanswered_rate || 0}%</div>
-        </div>
       </div>
 
-      {/* ---- Charts Section ---- */}
+      {/* ---- Charts ---- */}
       <div className="analytics-charts-header">
         <h3 className="admin-section-title" style={{ marginBottom: 0 }}>Visualizations</h3>
         <button
@@ -701,26 +801,14 @@ function AnalyticsTab() {
         </button>
       </div>
 
-      <div className="analytics-section-tabs">
-        {CHART_SECTIONS.map((s) => (
-          <button
-            key={s.key}
-            className={`analytics-section-tab ${activeSection === s.key ? 'active' : ''}`}
-            onClick={() => setActiveSection(s.key)}
-          >
-            {s.label}
-          </button>
-        ))}
-      </div>
-
       <div className="analytics-charts-grid">
-        {Object.entries(currentCharts).map(([key, chart]) => (
-          <div className="analytics-chart-card" key={key}>
-            <h4 className="analytics-chart-title">{chart?.title || key}</h4>
-            {chart?.image ? (
+        {allCharts.map((chart) => (
+          <div className="analytics-chart-card" key={chart.key}>
+            <h4 className="analytics-chart-title">{chart.title || chart.key}</h4>
+            {chart.image ? (
               <img
                 src={`data:image/png;base64,${chart.image}`}
-                alt={chart.title || key}
+                alt={chart.title || chart.key}
                 className="analytics-chart-img"
               />
             ) : (
@@ -728,7 +816,7 @@ function AnalyticsTab() {
             )}
           </div>
         ))}
-        {Object.keys(currentCharts).length === 0 && (
+        {allCharts.length === 0 && (
           <div className="admin-empty" style={{ gridColumn: '1 / -1' }}>
             No chart data available. Send some messages to the chatbot first.
           </div>
@@ -764,64 +852,6 @@ function AnalyticsTab() {
         <div className="admin-empty">No queries recorded yet.</div>
       )}
 
-      {/* ---- Unanswered Questions Table ---- */}
-      <h3 className="admin-section-title" style={{ marginTop: '2rem' }}>Unanswered Questions</h3>
-      {unanswered && unanswered.total_queries > 0 && (
-        <div className="admin-cards-row" style={{ marginBottom: '1rem' }}>
-          <div className="admin-card">
-            <div className="admin-card-label">Unanswered</div>
-            <div className="admin-card-value">{unanswered.total_unanswered}</div>
-          </div>
-          <div className="admin-card">
-            <div className="admin-card-label">Total Queries</div>
-            <div className="admin-card-value">{unanswered.total_queries}</div>
-          </div>
-          <div className="admin-card">
-            <div className="admin-card-label">Unanswered Rate</div>
-            <div className="admin-card-value">
-              {unanswered.total_queries > 0
-                ? `${((unanswered.total_unanswered / unanswered.total_queries) * 100).toFixed(1)}%`
-                : '0%'}
-            </div>
-          </div>
-        </div>
-      )}
-      <p className="admin-info-note">
-        These are questions the chatbot could not answer. Consider adding relevant FAQs or
-        database entries to cover these topics, then re-index.
-      </p>
-      {unanswered?.queries?.length > 0 ? (
-        <div className="admin-table-wrapper">
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Question</th>
-                <th>Times Asked</th>
-                <th>Language</th>
-                <th>Best FAQ Score</th>
-                <th>Best DB Score</th>
-                <th>Last Asked</th>
-              </tr>
-            </thead>
-            <tbody>
-              {unanswered.queries.map((q, i) => (
-                <tr key={i}>
-                  <td>{i + 1}</td>
-                  <td className="admin-td-text" dir="auto">{q.query}</td>
-                  <td>{q.count}</td>
-                  <td>{q.language === 'ar' ? 'Arabic' : 'English'}</td>
-                  <td>{(q.faq_top_score * 100).toFixed(0)}%</td>
-                  <td>{(q.db_top_score * 100).toFixed(0)}%</td>
-                  <td className="admin-td-text admin-card-value-small">{q.last_asked ? q.last_asked.slice(0, 10) : ''}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="admin-empty">No unanswered questions recorded yet.</div>
-      )}
     </div>
   );
 }
@@ -916,6 +946,18 @@ function ConversationsTab() {
     }
   };
 
+  const handleDeleteConversation = async (conv) => {
+    if (!window.confirm(`Delete conversation #${conv.id}? This will also remove any feedback. This cannot be undone.`)) return;
+    try {
+      await deleteConversation(conv.id);
+      setToast({ message: 'Conversation deleted.', type: 'success' });
+      if (expandedId === conv.id) setExpandedId(null);
+      await loadData();
+    } catch (err) {
+      setToast({ message: `Failed to delete: ${err.message}`, type: 'error' });
+    }
+  };
+
   const handleQuickThumbsUp = async (conv) => {
     try {
       await submitFeedback(conv.id, 1, null, null);
@@ -936,8 +978,9 @@ function ConversationsTab() {
   };
 
   const getRatingBadge = (conv) => {
-    if (conv.rating === 1) return <span className="conv-badge conv-badge-positive">Good</span>;
-    if (conv.rating === -1) return <span className="conv-badge conv-badge-negative">Needs Fix</span>;
+    const src = conv.feedback_source === 'user' ? ' (User)' : '';
+    if (conv.rating === 1) return <span className="conv-badge conv-badge-positive">Good{src}</span>;
+    if (conv.rating === -1) return <span className="conv-badge conv-badge-negative">Needs Fix{src}</span>;
     return <span className="conv-badge conv-badge-unreviewed">Unreviewed</span>;
   };
 
@@ -987,6 +1030,7 @@ function ConversationsTab() {
           { key: 'unreviewed', label: 'Unreviewed' },
           { key: 'positive', label: 'Positive' },
           { key: 'negative', label: 'Negative' },
+          { key: 'user_feedback', label: 'User Feedback' },
         ].map((f) => (
           <button
             key={f.key || 'all'}
@@ -1044,6 +1088,15 @@ function ConversationsTab() {
                       <td>{getRatingBadge(conv)}</td>
                       <td className="admin-card-value-small">{formatDate(conv.created_at)}</td>
                       <td className="admin-td-actions" onClick={(e) => e.stopPropagation()}>
+                        {conv.feedback_source === 'user' && conv.rating === -1 && (
+                          <button
+                            className="admin-btn admin-btn-sm admin-btn-resolve"
+                            title="Resolve user feedback"
+                            onClick={() => openFeedbackForm(conv, -1)}
+                          >
+                            Resolve
+                          </button>
+                        )}
                         <button
                           className={`conv-thumb-btn conv-thumb-up ${conv.rating === 1 ? 'conv-thumb-active' : ''}`}
                           title="Good answer"
@@ -1057,6 +1110,14 @@ function ConversationsTab() {
                           onClick={() => openFeedbackForm(conv, -1)}
                         >
                           &#x1F44E;
+                        </button>
+                        <button
+                          className="admin-btn admin-btn-sm admin-btn-danger"
+                          title="Delete conversation"
+                          onClick={() => handleDeleteConversation(conv)}
+                          style={{ marginLeft: '4px' }}
+                        >
+                          Delete
                         </button>
                       </td>
                     </tr>
@@ -1083,7 +1144,9 @@ function ConversationsTab() {
                             </div>
                             {conv.corrected_answer && (
                               <div className="conv-detail-section conv-correction-section">
-                                <h4>Admin Corrected Answer</h4>
+                                <h4>
+                                  {conv.feedback_source === 'user' ? 'User Suggested Answer' : 'Admin Corrected Answer'}
+                                </h4>
                                 <p dir="auto">{conv.corrected_answer}</p>
                                 {conv.comment && <p className="conv-comment"><em>Comment: {conv.comment}</em></p>}
                               </div>
@@ -1128,7 +1191,11 @@ function ConversationsTab() {
         <div className="conv-modal-overlay" onClick={closeFeedbackForm}>
           <div className="conv-modal" onClick={(e) => e.stopPropagation()}>
             <h3 className="conv-modal-title">
-              {feedbackRating === -1 ? 'Provide Correction' : 'Confirm Positive Feedback'}
+              {feedbackTarget.feedback_source === 'user' && feedbackTarget.rating === -1
+                ? 'Resolve User Feedback'
+                : feedbackRating === -1
+                  ? 'Provide Correction'
+                  : 'Confirm Positive Feedback'}
             </h3>
 
             <div className="conv-modal-section">
@@ -1140,6 +1207,16 @@ function ConversationsTab() {
               <label>Chatbot Answer:</label>
               <p dir="auto" className="conv-modal-text">{feedbackTarget.answer?.substring(0, 500)}</p>
             </div>
+
+            {/* Show user's comment if resolving user feedback */}
+            {feedbackTarget.feedback_source === 'user' && feedbackTarget.comment && (
+              <div className="conv-modal-section conv-user-comment-section">
+                <label>User Reported:</label>
+                <p dir="auto" className="conv-modal-text conv-user-comment">
+                  {feedbackTarget.comment}
+                </p>
+              </div>
+            )}
 
             {feedbackRating === -1 && (
               <>
@@ -1184,10 +1261,43 @@ function ConversationsTab() {
 }
 
 // ---------------------------------------------------------------------------
+
+// Evaluation UI removed. Use backend API: POST /api/admin/evaluation/run
+
 // Main Admin Dashboard
 // ---------------------------------------------------------------------------
+
 function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('status');
+  const [scraping, setScraping] = useState(false);
+  const [scrapeMessage, setScrapeMessage] = useState('');
+
+  const handleRescrape = useCallback(async () => {
+    if (!window.confirm('This will re-scrape the AUB library website and rebuild library pages and document chunks. This may take several minutes. Continue?')) return;
+    setScraping(true);
+    setScrapeMessage('Starting scrape...');
+    try {
+      await triggerRescrape();
+      const poll = setInterval(async () => {
+        try {
+          const status = await getRescrapeStatus();
+          setScrapeMessage(status.message || 'Scraping...');
+          if (!status.running) {
+            clearInterval(poll);
+            setScraping(false);
+            setScrapeMessage('');
+          }
+        } catch {
+          clearInterval(poll);
+          setScraping(false);
+          setScrapeMessage('');
+        }
+      }, 3000);
+    } catch {
+      setScraping(false);
+      setScrapeMessage('');
+    }
+  }, []);
 
   return (
     <div className="app-container admin-page" dir="ltr" lang="en">
@@ -1225,8 +1335,8 @@ function AdminDashboard() {
           </button>
         </div>
 
-        {activeTab === 'status' && <SystemStatusTab />}
-        {activeTab === 'data' && <DataManagementTab />}
+        {activeTab === 'status' && <SystemStatusTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
+        {activeTab === 'data' && <DataManagementTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
         {activeTab === 'analytics' && <AnalyticsTab />}
         {activeTab === 'conversations' && <ConversationsTab />}
       </div>

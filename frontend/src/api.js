@@ -137,6 +137,25 @@ export async function deleteDatabase(id) {
 // Admin API -- Library Pages
 // ---------------------------------------------------------------------------
 
+export async function searchDocumentChunks(query, offset = 0, limit = 20) {
+  const res = await fetch(
+    `${API_BASE}/api/admin/document-chunks/search?q=${encodeURIComponent(query)}&offset=${offset}&limit=${limit}`
+  );
+  if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteDocumentChunk(id) {
+  const res = await fetch(`${API_BASE}/api/admin/document-chunk/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to delete chunk: ${res.status} - ${errorText}`);
+  }
+  return res.json();
+}
+
 export async function deleteLibraryPage(id) {
   const res = await fetch(`${API_BASE}/api/admin/library-page/${id}`, {
     method: 'DELETE',
@@ -242,8 +261,19 @@ export async function getConversation(id) {
   return res.json();
 }
 
-export async function submitFeedback(conversationId, rating, correctedAnswer = null, comment = null) {
-  const body = { conversation_id: conversationId, rating };
+export async function deleteConversation(id) {
+  const res = await fetch(`${API_BASE}/api/admin/conversations/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to delete conversation: ${res.status} - ${errorText}`);
+  }
+  return res.json();
+}
+
+export async function submitFeedback(conversationId, rating, correctedAnswer = null, comment = null, source = 'admin') {
+  const body = { conversation_id: conversationId, rating, source };
   if (correctedAnswer) body.corrected_answer = correctedAnswer;
   if (comment) body.comment = comment;
 
@@ -270,5 +300,41 @@ export async function deleteFeedback(feedbackId) {
 export async function getFeedbackStats() {
   const res = await fetch(`${API_BASE}/api/admin/feedback/stats`);
   if (!res.ok) throw new Error(`Failed to fetch feedback stats: ${res.status}`);
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Admin API -- Evaluation
+// ---------------------------------------------------------------------------
+
+export async function runEvaluation(questions, language = null) {
+  const body = { questions };
+  if (language) body.language = language;
+
+  const res = await fetch(`${API_BASE}/api/admin/evaluation/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Evaluation failed: ${res.status} - ${errorText}`);
+  }
+  return res.json();
+}
+
+export async function runSingleEvaluation(question, language = null) {
+  const body = { question };
+  if (language) body.language = language;
+
+  const res = await fetch(`${API_BASE}/api/admin/evaluation/single`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Evaluation failed: ${res.status} - ${errorText}`);
+  }
   return res.json();
 }

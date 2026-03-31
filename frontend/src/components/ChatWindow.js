@@ -3,7 +3,7 @@ import MessageBubble from './MessageBubble';
 import { useLanguage } from '../LanguageContext';
 import { t } from '../i18n';
 
-function ChatWindow({ messages, loading }) {
+function ChatWindow({ messages, loading, onFeedback }) {
   const scrollRef = useRef(null);
   const { language } = useLanguage();
 
@@ -36,7 +36,11 @@ function ChatWindow({ messages, loading }) {
           </div>
         )}
         {messages.map((msg, index) => (
-          <MessageBubble key={index} message={msg} />
+          <MessageBubble
+            key={index}
+            message={msg}
+            onFeedback={onFeedback ? (rating, correction) => onFeedback(index, rating, correction) : null}
+          />
         ))}
         {loading && (
           <div className="loading-container">

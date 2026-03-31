@@ -54,21 +54,56 @@ No test suite exists yet.
 
 ## Architecture
 
-### Data Flow
+### Data Flow (Pipeline v3: Query Rewriting + Cross-Encoder Reranking)
 ```
 React UI --> POST /api/chat { message, language? } --> FastAPI
-  --> Cache lookup (search_query, lang)
+  --> 1. Input Guards (prompt injection detection, domain scope check)
+  --> 2. Query Rewriting (LLM-based via gpt-4o-mini)
+        --> Follow-up resolution using conversation history
+        --> Arabic → English translation for retrieval
+        --> Short/vague query expansion
+        --> Fast-path skip for well-formed English queries (>5 words)
+  --> Cache lookup (rewritten_query, lang)
   --> HIT: return cached (answer, debug) immediately
   --> MISS:
-    --> embed_text(query) via OpenAI API
-    --> pgvector cosine similarity search (ORDER BY embedding <=> query_vec)
-    --> Parallel Search (FAQ, DB, Library Pages tables)
-    --> Intent Detection (bilingual keyword regex)
-    --> Language Resolution (explicit param > auto-detect)
-    --> Response Router
-    --> Cache store (answer, debug)
+    --> Admin feedback correction lookup (pgvector similarity >= 0.85)
+    --> FOUND: use admin-corrected answer via LLM
+    --> NOT FOUND:
+      --> 3. Intent Classification → table/page_type pre-filtering
+            --> hours → hours_contact pages, database → databases table, etc.
+      --> 4. Hybrid Retrieval (per table: vector + keyword search)
+            --> Vector: embed_text(rewritten_query) -> pgvector cosine similarity
+            --> Keyword: phraseto_tsquery (boosted 2x) + plainto_tsquery + synonym expansion
+            --> Merge: Reciprocal Rank Fusion (65% vector, 35% keyword)
+            --> page_type WHERE clause for document_chunks when intent is specific
+      --> 5. LLM Reranking (gpt-4o-mini relevance scoring 0-1)
+            --> Dedup (Jaccard 0.85) → top 15 → score relevance → min_score 0.5
+      --> 6. Context Sufficiency Check
+            --> top_score >= 0.55 → confident answer
+            --> top_score 0.40-0.55 → partial answer (extra caution prompt)
+            --> top_score < 0.40 → abstain (refuse to answer)
+      --> 7. Grounded Answer Generation (uses ORIGINAL query for user language)
+            --> System prompt: role-locked, self-check, cite-or-remove
+            --> temperature=0.0, top_p=0.85
+            --> Partial-context warning injected when context is borderline
+      --> 8. Claim Verification (LLM-based strict checking + regex safety)
+            --> Fail-safe: if verifier errors, return cautious fallback (not raw draft)
+      --> Cache store (answer, debug)
   --> JSON { answer, debug, detected_language }
   --> React renders markdown (RTL for Arabic)
+```
+
+### Ingestion Pipeline (Scraping -> Chunks)
+```
+Playwright Scraper --> Raw HTML pages (preserves innerHTML + innerText)
+  --> scraper_cleaner.py: BeautifulSoup HTML parsing, noise removal,
+      preserves headings/tables/lists/structure, page type detection
+  --> document_processor.py: page type routing, FAQ Q&A pair extraction,
+      hours/schedule parsing per-location, section splitting
+  --> chunker.py: structure-aware chunking (tables stay intact, FAQ pairs
+      become individual chunks, lists not split mid-item, overlap on text only)
+  --> embeddings.py: OpenAI text-embedding-3-small
+  --> PostgreSQL: document_chunks table (+ legacy library_pages with cleaned text)
 ```
 
 ### API Endpoints
@@ -100,8 +135,16 @@ React UI --> POST /api/chat { message, language? } --> FastAPI
   - `database.py` -- PostgreSQL connection pool (`ThreadedConnectionPool`), schema initialization
   - `embeddings.py` -- Centralized OpenAI embedding generation (`embed_text`, `embed_texts`)
   - `cache.py` -- `ResponseCache` in-memory TTL+LRU cache for chatbot responses
-  - `index_builder.py` -- `IndexBuilder` for building PostgreSQL tables from CSV data
+  - `index_builder.py` -- `IndexBuilder` for building PostgreSQL tables from CSV data + chunk pipeline
   - `admin.py` -- `AdminManager` for CRUD operations on PostgreSQL tables
+  - `scraper_cleaner.py` -- HTML cleaning, noise removal, structured document extraction
+  - `document_processor.py` -- Page type detection, FAQ extraction, section splitting, LLM enrichment
+  - `chunker.py` -- Semantic chunking by headings/sections with overlap and metadata (500 char target)
+  - `retriever.py` -- Hybrid retrieval: vector + keyword (phrase+plain tsquery, synonym expansion) + RRF + intent pre-filtering
+  - `reranker.py` -- LLM-based reranking (gpt-4o-mini relevance scoring, min_score=0.5)
+  - `query_rewriter.py` -- LLM-based query rewriting (follow-up resolution, Arabic→English, expansion)
+  - `input_guard.py` -- Pre-processing safety: prompt injection detection + domain scope filtering
+  - `verifier.py` -- Post-generation claim verification + safety validation
   - `analytics.py` -- `ChatLogger`, `AnalyticsComputer` for usage tracking
   - `chart_generator.py` -- `ChartGenerator` for matplotlib chart generation (22 charts, base64 PNG)
 - **`frontend/`** -- React application
@@ -136,11 +179,14 @@ React UI --> POST /api/chat { message, language? } --> FastAPI
 ### PostgreSQL Tables (pgvector, stored in Docker volume)
 | Table | Documents (embedded text) | Metadata Columns |
 |---|---|---|
-| `faq` | question text | `question`, `answer` |
+| `faq` | question + answer text | `question`, `answer` |
 | `databases` | `"{name}. {description}"` | `name`, `description` |
 | `library_pages` | `"{title}\n\n{content}"` | `url`, `title`, `content` |
+| `document_chunks` | chunk_text (semantic chunks) | `page_url`, `page_title`, `section_title`, `page_type`, `chunk_index` |
+| `chat_conversations` | query + answer logs | `query`, `answer`, `language`, `chosen_source`, scores, `retrieved_chunks` (JSONB) |
+| `chat_feedback` | admin feedback | `conversation_id`, `rating`, `corrected_answer`, `comment`, `embedding` |
 
-All tables have HNSW indexes on the `embedding vector(1536)` column using `vector_cosine_ops`.
+All embedding tables have HNSW indexes on `embedding vector(1536)` using `vector_cosine_ops`.
 
 ### Source Data Files (under `data/`)
 - **`library_faq_clean.csv`** -- FAQ source data (question/answer pairs)

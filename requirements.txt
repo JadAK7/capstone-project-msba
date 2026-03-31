@@ -4,6 +4,8 @@ python-dotenv>=1.0.0
 
 # Data processing
 pandas>=2.0.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
 
 # Web framework
 fastapi>=0.104.0
@@ -17,6 +19,6 @@ numpy>=1.24.0
 # Analytics / Visualization
 matplotlib>=3.7.0
 
-# Scraping (optional -- install separately for scrape_aub_library.py)
-# pip install playwright tqdm && playwright install chromium
+# Scraping
 tqdm>=4.66.0
+playwright>=1.40.0

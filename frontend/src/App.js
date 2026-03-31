@@ -5,7 +5,7 @@ import Footer from './components/Footer';
 import ChatWindow from './components/ChatWindow';
 import ChatInput from './components/ChatInput';
 import AdminDashboard from './pages/AdminDashboard';
-import { sendMessage, checkHealth } from './api';
+import { sendMessage, checkHealth, submitFeedback } from './api';
 import { LanguageProvider, useLanguage } from './LanguageContext';
 import { t } from './i18n';
 
@@ -66,6 +66,8 @@ function ChatPage() {
         content: response.answer || 'No response received.',
         debug: response.debug || null,
         detectedLanguage: detectedLang,
+        conversationId: response.conversation_id || null,
+        feedbackGiven: null,
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err) {
@@ -78,6 +80,25 @@ function ChatPage() {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleFeedback = async (messageIndex, rating, userComment) => {
+    const msg = messages[messageIndex];
+    if (!msg || !msg.conversationId) return;
+    try {
+      await submitFeedback(
+        msg.conversationId,
+        rating,
+        null,
+        userComment || null,
+        'user',
+      );
+      setMessages((prev) =>
+        prev.map((m, i) => i === messageIndex ? { ...m, feedbackGiven: rating } : m)
+      );
+    } catch (err) {
+      console.error('Feedback submission failed:', err);
     }
   };
 
@@ -104,7 +125,7 @@ function ChatPage() {
       )}
 
       <main className="main-content">
-        <ChatWindow messages={messages} loading={loading} />
+        <ChatWindow messages={messages} loading={loading} onFeedback={handleFeedback} />
         <ChatInput onSubmit={handleSubmit} disabled={loading || backendStatus === 'error'} />
       </main>
 

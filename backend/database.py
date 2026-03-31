@@ -49,11 +49,28 @@ CREATE TABLE IF NOT EXISTS library_pages (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Semantic chunks from processed documents (for upgraded RAG pipeline)
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id TEXT PRIMARY KEY,
+    chunk_text TEXT NOT NULL,
+    embedding vector(1536) NOT NULL,
+    page_url TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    section_title TEXT NOT NULL DEFAULT '',
+    page_type TEXT NOT NULL DEFAULT 'general',
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_faq_embedding ON faq USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_databases_embedding ON databases USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_library_pages_embedding ON library_pages USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_chunks_fts ON document_chunks USING gin (to_tsvector('english', chunk_text));
+CREATE INDEX IF NOT EXISTS idx_chunks_page_type ON document_chunks (page_type);
 
 -- Chat conversations: every question + answer the chatbot produces
+-- Also stores all analytics/debugging fields (replaces chat_logs.json file)
 CREATE TABLE IF NOT EXISTS chat_conversations (
     id SERIAL PRIMARY KEY,
     query TEXT NOT NULL,
@@ -65,10 +82,30 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
     library_top_score REAL DEFAULT 0,
     response_time_ms REAL DEFAULT 0,
     retrieved_chunks JSONB DEFAULT '[]'::jsonb,
+    -- Analytics fields
+    cache_hit BOOLEAN DEFAULT FALSE,
+    query_word_count INTEGER DEFAULT 0,
+    keyword_intent_fired BOOLEAN DEFAULT FALSE,
+    sources_above_threshold INTEGER DEFAULT 0,
+    top_faq_question TEXT DEFAULT '',
+    top_db_name TEXT DEFAULT '',
+    -- Hallucination debugging
+    draft_answer TEXT DEFAULT '',
+    verified_answer TEXT DEFAULT '',
+    removed_claims JSONB DEFAULT '[]'::jsonb,
+    context_sent_to_llm TEXT DEFAULT '',
+    verification_passed BOOLEAN DEFAULT TRUE,
+    -- Safety / guard fields
+    guard_injection_detected BOOLEAN DEFAULT FALSE,
+    guard_out_of_scope BOOLEAN DEFAULT FALSE,
+    guard_refusal_reason TEXT DEFAULT '',
+    guard_matched_patterns JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_created ON chat_conversations (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_language ON chat_conversations (language);
+CREATE INDEX IF NOT EXISTS idx_conversations_source ON chat_conversations (chosen_source);
 
 -- Admin feedback on conversations
 CREATE TABLE IF NOT EXISTS chat_feedback (
@@ -86,6 +123,47 @@ CREATE INDEX IF NOT EXISTS idx_feedback_rating ON chat_feedback (rating);
 CREATE INDEX IF NOT EXISTS idx_feedback_embedding ON chat_feedback USING hnsw (embedding vector_cosine_ops)
     WHERE embedding IS NOT NULL;
 """
+
+
+_MIGRATION_COLUMNS = [
+    ("cache_hit", "BOOLEAN DEFAULT FALSE"),
+    ("query_word_count", "INTEGER DEFAULT 0"),
+    ("keyword_intent_fired", "BOOLEAN DEFAULT FALSE"),
+    ("sources_above_threshold", "INTEGER DEFAULT 0"),
+    ("top_faq_question", "TEXT DEFAULT ''"),
+    ("top_db_name", "TEXT DEFAULT ''"),
+    ("draft_answer", "TEXT DEFAULT ''"),
+    ("verified_answer", "TEXT DEFAULT ''"),
+    ("removed_claims", "JSONB DEFAULT '[]'::jsonb"),
+    ("context_sent_to_llm", "TEXT DEFAULT ''"),
+    ("verification_passed", "BOOLEAN DEFAULT TRUE"),
+    ("guard_injection_detected", "BOOLEAN DEFAULT FALSE"),
+    ("guard_out_of_scope", "BOOLEAN DEFAULT FALSE"),
+    ("guard_refusal_reason", "TEXT DEFAULT ''"),
+    ("guard_matched_patterns", "JSONB DEFAULT '[]'::jsonb"),
+]
+
+
+def _migrate_chat_conversations(conn) -> None:
+    """Add any missing columns to chat_conversations (safe to run repeatedly)."""
+    try:
+        with conn.cursor() as cur:
+            for col_name, col_def in _MIGRATION_COLUMNS:
+                cur.execute(
+                    f"ALTER TABLE chat_conversations ADD COLUMN IF NOT EXISTS {col_name} {col_def}"
+                )
+            # Migrate chat_feedback: add source column (user vs admin)
+            cur.execute(
+                "ALTER TABLE chat_feedback "
+                "ADD COLUMN IF NOT EXISTS feedback_source TEXT DEFAULT 'admin'"
+            )
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"Migration of chat_conversations columns failed (non-critical): {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 def init_db() -> None:
@@ -112,6 +190,10 @@ def init_db() -> None:
         conn.commit()
     finally:
         _pool.putconn(conn)
+
+    # Migrate: add new analytics columns to existing chat_conversations table.
+    # ALTER TABLE ... ADD COLUMN IF NOT EXISTS is safe to run repeatedly.
+    _migrate_chat_conversations(conn)
 
     logger.info("Database schema initialized")
 

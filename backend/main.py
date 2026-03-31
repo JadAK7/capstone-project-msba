@@ -20,10 +20,10 @@ from pydantic import BaseModel
 
 import json as _json
 
-from .chatbot import LibraryChatbot, LanguageDetector
+from .chatbot import LibraryChatbot
 from .database import init_db, close_db, get_connection
 from .index_builder import IndexBuilder
-from .admin import AdminManager, set_last_index_build_time
+from .admin import AdminManager, set_last_index_build_time, set_last_scrape_time
 from .analytics import ChatLogger, AnalyticsComputer
 from .evaluation import evaluate_single, run_evaluation_pipeline
 
@@ -96,7 +96,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     debug: dict
-    detected_language: str 
+    detected_language: str
+    conversation_id: Optional[int] = None
 
 
 class FAQRequest(BaseModel):
@@ -114,6 +115,7 @@ class FeedbackRequest(BaseModel):
     rating: int  # 1 = thumbs up, -1 = thumbs down
     corrected_answer: Optional[str] = None
     comment: Optional[str] = None
+    source: Optional[str] = "admin"  # "admin" or "user"
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +179,7 @@ def chat(req: ChatRequest):
     detected_language = debug.get("detected_language", "en")
 
     # Log the interaction for analytics (best-effort, non-blocking)
+    conversation_id = None
     try:
         faq_scores = debug.get("faq_scores", [])
         db_scores = debug.get("db_scores", [])
@@ -184,7 +187,7 @@ def chat(req: ChatRequest):
         faq_metas = debug.get("faq_metadatas", [])
         db_metas = debug.get("db_metadatas", [])
 
-        _chat_logger.log(
+        conversation_id = _chat_logger.log(
             query=query_text,
             language=detected_language,
             intent_source=debug.get("chosen_source", "unknown"),
@@ -205,43 +208,26 @@ def chat(req: ChatRequest):
             top_db_name=db_metas[0].get("name", "") if db_metas else "",
             generated_answer=answer,
             retrieved_chunks=debug.get("retrieved_chunks", []),
+            # Hallucination debugging fields
+            draft_answer=debug.get("draft_answer", ""),
+            verified_answer=answer if debug.get("removed_claims") else "",
+            removed_claims=debug.get("removed_claims", []),
+            context_sent_to_llm=debug.get("context_sent_to_llm", ""),
+            verification_passed=debug.get("verified", True),
+            # Safety / guard fields
+            guard_injection_detected=debug.get("guard_injection_detected", False),
+            guard_out_of_scope=debug.get("guard_out_of_scope", False),
+            guard_refusal_reason=debug.get("guard_refusal_reason", ""),
+            guard_matched_patterns=debug.get("guard_matched_patterns", []),
         )
     except Exception as e:
         logger.warning(f"Chat logging failed (non-critical): {e}")
-
-    # Save conversation to database (best-effort)
-    try:
-        faq_scores = debug.get("faq_scores", [])
-        db_scores = debug.get("db_scores", [])
-        library_scores = debug.get("library_scores", [])
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO chat_conversations
-                       (query, answer, language, chosen_source,
-                        faq_top_score, db_top_score, library_top_score,
-                        response_time_ms, retrieved_chunks)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        query_text,
-                        answer,
-                        detected_language,
-                        debug.get("chosen_source", ""),
-                        faq_scores[0][1] if faq_scores else 0.0,
-                        db_scores[0][1] if db_scores else 0.0,
-                        library_scores[0][1] if library_scores else 0.0,
-                        response_time_ms,
-                        _json.dumps(debug.get("retrieved_chunks", [])),
-                    ),
-                )
-            conn.commit()
-    except Exception as e:
-        logger.warning(f"Conversation DB save failed (non-critical): {e}")
 
     return ChatResponse(
         answer=answer,
         debug=debug,
         detected_language=detected_language,
+        conversation_id=conversation_id,
     )
 
 
@@ -268,7 +254,7 @@ def admin_list_collections():
 @app.get("/api/admin/collections/{collection_name}/entries")
 def admin_get_entries(collection_name: str, offset: int = 0, limit: int = 20):
     """Return paginated entries from a collection."""
-    valid_names = ["faq", "databases", "library_pages"]
+    valid_names = ["faq", "databases", "library_pages", "document_chunks"]
     if collection_name not in valid_names:
         raise HTTPException(
             status_code=400,
@@ -376,6 +362,61 @@ def admin_delete_database(entry_id: str):
 # ---------------------------------------------------------------------------
 # Admin endpoints -- Library Pages (delete only)
 # ---------------------------------------------------------------------------
+
+@app.get("/api/admin/document-chunks/search")
+def admin_search_document_chunks(q: str, offset: int = 0, limit: int = 20):
+    """Search document chunks by text content."""
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Search query cannot be empty")
+    try:
+        search_term = f"%{q.strip()}%"
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM document_chunks WHERE chunk_text ILIKE %s",
+                    (search_term,),
+                )
+                total = cur.fetchone()[0]
+
+                cur.execute(
+                    "SELECT id, chunk_text, page_url, page_title, section_title, page_type, chunk_index "
+                    "FROM document_chunks WHERE chunk_text ILIKE %s "
+                    "ORDER BY id LIMIT %s OFFSET %s",
+                    (search_term, limit, offset),
+                )
+                rows = cur.fetchall()
+
+        entries = []
+        for row in rows:
+            entries.append({
+                "id": row[0],
+                "document": row[1],
+                "metadata": {
+                    "page_url": row[2],
+                    "page_title": row[3],
+                    "section_title": row[4],
+                    "page_type": row[5],
+                    "chunk_index": row[6],
+                },
+            })
+
+        return {"entries": entries, "total": total, "offset": offset, "limit": limit}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/document-chunk/{entry_id}")
+def admin_delete_document_chunk(entry_id: str):
+    """Delete a document chunk entry."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM document_chunks WHERE id = %s", (entry_id,))
+            conn.commit()
+        return {"id": entry_id, "deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.delete("/api/admin/library-page/{entry_id}")
 def admin_delete_library_page(entry_id: str):
@@ -513,7 +554,7 @@ def _run_scrape():
     try:
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
-        from scrape_aub_library import AUBLibraryScraper, build_library_index, \
+        from scrape_aub_library import AUBLibraryScraper, \
             START_URLS, ALLOWED_DOMAIN, ALLOWED_PATHS, MAX_PAGES
 
         _scrape_status["message"] = "Crawling AUB library website..."
@@ -533,8 +574,8 @@ def _run_scrape():
             _scrape_status["running"] = False
             return
 
-        _scrape_status["message"] = f"Building embeddings for {len(scraped_data)} pages..."
-        count = build_library_index(scraped_data)
+        _scrape_status["message"] = f"Processing {len(scraped_data)} pages through pipeline..."
+        count = IndexBuilder.build_chunks_from_scraped(scraped_data)
 
         # Reset singletons so they pick up fresh data
         if _chatbot is not None:
@@ -542,7 +583,8 @@ def _run_scrape():
         _chatbot = None
         _admin_manager = None
 
-        _scrape_status["message"] = f"Scraping complete. {count} library pages indexed."
+        set_last_scrape_time()
+        _scrape_status["message"] = f"Scraping complete. {count} chunks indexed from {len(scraped_data)} pages."
         _scrape_status["error"] = None
         logger.info(f"Rescrape complete: {count} library pages indexed.")
     except Exception as e:
@@ -597,7 +639,8 @@ def list_conversations(offset: int = 0, limit: int = 30, rating_filter: Optional
                            c.faq_top_score, c.db_top_score, c.library_top_score,
                            c.response_time_ms, c.created_at,
                            f.id AS feedback_id, f.rating, f.corrected_answer,
-                           f.comment, f.created_at AS feedback_at
+                           f.comment, f.created_at AS feedback_at,
+                           f.feedback_source
                     FROM chat_conversations c
                     LEFT JOIN chat_feedback f ON f.conversation_id = c.id
                 """
@@ -610,6 +653,8 @@ def list_conversations(offset: int = 0, limit: int = 30, rating_filter: Optional
                     conditions.append("f.rating = -1")
                 elif rating_filter == "unreviewed":
                     conditions.append("f.id IS NULL")
+                elif rating_filter == "user_feedback":
+                    conditions.append("f.feedback_source = 'user'")
 
                 if conditions:
                     base_query += " WHERE " + " AND ".join(conditions)
@@ -708,19 +753,22 @@ def submit_feedback(req: FeedbackRequest):
                     (req.conversation_id,),
                 )
 
-                # Generate embedding for the original query (used for similarity lookup)
+                # Always generate embedding for the original query so feedback
+                # lookup works for both positive and negative ratings.
+                # Positive feedback confirms the answer is good (used to skip
+                # regeneration).  Negative + corrected_answer provides the fix.
                 query_text = conv_row[0]
                 embedding = None
-                if req.rating == -1 and req.corrected_answer:
-                    try:
-                        embedding = _embed(query_text)
-                    except Exception as e:
-                        logger.warning(f"Failed to embed query for feedback: {e}")
+                try:
+                    embedding = _embed(query_text)
+                except Exception as e:
+                    logger.warning(f"Failed to embed query for feedback: {e}")
 
+                feedback_source = req.source if req.source in ("admin", "user") else "admin"
                 cur.execute(
                     """INSERT INTO chat_feedback
-                       (conversation_id, rating, corrected_answer, comment, embedding)
-                       VALUES (%s, %s, %s, %s, %s)
+                       (conversation_id, rating, corrected_answer, comment, embedding, feedback_source)
+                       VALUES (%s, %s, %s, %s, %s, %s)
                        RETURNING id""",
                     (
                         req.conversation_id,
@@ -728,16 +776,40 @@ def submit_feedback(req: FeedbackRequest):
                         req.corrected_answer.strip() if req.corrected_answer else None,
                         req.comment.strip() if req.comment else None,
                         embedding,
+                        feedback_source,
                     ),
                 )
                 feedback_id = cur.fetchone()[0]
             conn.commit()
+
+        # Clear the response cache so the corrected answer is used on next query
+        bot = get_chatbot()
+        if bot:
+            bot.clear_cache()
 
         return {"status": "ok", "feedback_id": feedback_id}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to submit feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/conversations/{conversation_id}")
+def delete_conversation(conversation_id: int):
+    """Delete a chat conversation and its associated feedback."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM chat_feedback WHERE conversation_id = %s", (conversation_id,))
+                cur.execute("DELETE FROM chat_conversations WHERE id = %s RETURNING id", (conversation_id,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Conversation not found")
+            conn.commit()
+        return {"status": "ok", "id": conversation_id}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -837,6 +909,7 @@ def evaluate_single_question(req: SingleEvalRequest):
             answer=answer,
             retrieved_chunks=debug.get("retrieved_chunks", []),
             chosen_source=debug.get("chosen_source", ""),
+            context_sent_to_llm=debug.get("context_sent_to_llm", ""),
         )
         result["full_answer"] = answer
         result["debug"] = {
