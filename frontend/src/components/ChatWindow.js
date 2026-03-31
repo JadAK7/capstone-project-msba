@@ -3,13 +3,16 @@ import MessageBubble from './MessageBubble';
 import { useLanguage } from '../LanguageContext';
 import { t } from '../i18n';
 
-function ChatWindow({ messages, loading }) {
+function ChatWindow({ messages, loading, onFeedback }) {
   const scrollRef = useRef(null);
   const { language } = useLanguage();
 
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      scrollRef.current.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior: 'smooth'
+      });
     }
   }, [messages, loading]);
 
@@ -33,7 +36,11 @@ function ChatWindow({ messages, loading }) {
           </div>
         )}
         {messages.map((msg, index) => (
-          <MessageBubble key={index} message={msg} />
+          <MessageBubble
+            key={index}
+            message={msg}
+            onFeedback={onFeedback ? (rating, correction) => onFeedback(index, rating, correction) : null}
+          />
         ))}
         {loading && (
           <div className="loading-container">

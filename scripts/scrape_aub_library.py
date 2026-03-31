@@ -1,23 +1,27 @@
+
 """
 AUB Library Website Scraper
 Scrapes all pages from the AUB library website using Playwright (headless browser)
 so that JavaScript-rendered content (e.g. opening hours) is captured.
-Stores results in ChromaDB vector database.
+Stores results in PostgreSQL with pgvector embeddings.
 """
 
 import os
+import sys
 import re
 import time
 from urllib.parse import urlparse
 from collections import deque
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from tqdm import tqdm
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from backend.database import init_db, get_connection
 
 # Configuration
 START_URLS = [
@@ -33,9 +37,6 @@ PAGE_TIMEOUT = 60000  # 60 seconds for page navigation
 MAX_RETRIES = 3  # Retry failed page loads
 RETRY_DELAY = 2  # Seconds between retries
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-CHROMA_DIR = "./chroma_db"
-LIBRARY_COLLECTION = "library_pages"
-EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 class AUBLibraryScraper:
@@ -44,9 +45,24 @@ class AUBLibraryScraper:
         self.allowed_domain = allowed_domain
         self.allowed_paths = allowed_paths
         self.visited = set()
+        self.visited_base = set()  # normalized URLs (no query params)
         self.to_visit = deque(start_urls)
         self.scraped_data = []
-        self.failed_pages = []  # Track failed pages
+        self.failed_pages = []
+
+    # Paths that produce massive HTML (newsletters, embedded PDFs, news articles)
+    # but don't contain useful FAQ/hours/services content for the chatbot.
+    SKIP_PATH_PATTERNS = [
+        "/newsletter", "/news/pages/",
+    ]
+
+    @staticmethod
+    def normalize_url(url):
+        """Strip query params and fragments so the same page isn't scraped twice.
+
+        SharePoint pages like ?Expand=0, ?Expand=1 are the same content.
+        """
+        return url.split("?")[0].split("#")[0].rstrip("/")
 
     def is_valid_url(self, url):
         """Check if URL should be crawled."""
@@ -58,33 +74,77 @@ class AUBLibraryScraper:
         if not any(parsed.path.startswith(path) for path in self.allowed_paths):
             return False
 
+        path_lower = parsed.path.lower()
+
+        # Skip binary files
         skip_extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-                          '.zip', '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3']
-        if any(parsed.path.lower().endswith(ext) for ext in skip_extensions):
+                          '.zip', '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3',
+                          '.css', '.js']
+        if any(path_lower.endswith(ext) for ext in skip_extensions):
+            return False
+
+        # Skip paths that produce bloated noise (newsletters, news articles)
+        if any(pat in path_lower for pat in self.SKIP_PATH_PATTERNS):
+            return False
+
+        # Deduplicate: if we've already visited the base URL (without query params),
+        # don't visit it again with different params.
+        if self.normalize_url(url) in self.visited_base:
             return False
 
         return True
 
-    def extract_text(self, page):
-        """Extract meaningful text from rendered page using Playwright."""
+    @staticmethod
+    def _wait_for_stable_content(page, max_wait_ms=8000, interval_ms=500):
+        """Wait until the page's visible text stops growing.
+
+        Instead of a fixed sleep, this polls document.body.innerText.length
+        and returns once the value is stable for two consecutive checks.
+        Falls back to max_wait_ms if content never stabilises.
+        """
+        prev_len = 0
+        stable_checks = 0
+        elapsed = 0
+        while elapsed < max_wait_ms:
+            curr_len = page.evaluate("document.body.innerText.length")
+            if curr_len == prev_len and curr_len > 0:
+                stable_checks += 1
+                if stable_checks >= 2:
+                    return
+            else:
+                stable_checks = 0
+            prev_len = curr_len
+            page.wait_for_timeout(interval_ms)
+            elapsed += interval_ms
+
+    def extract_text_and_html(self, page):
+        """Extract text and raw HTML from the rendered page.
+
+        Returns (text, html).
+        • text  = innerText with line breaks preserved (for fallback extraction).
+        • html  = full innerHTML (for proper HTML-based extraction in
+                  content_extractor.py — noise removal happens there, not here).
+        """
+        # Capture the FULL innerHTML *before* removing anything, so the
+        # downstream extractor can apply its own generic noise-removal.
+        html = page.evaluate("document.body.innerHTML")
+
+        # For the text fallback, remove the noisiest elements in-browser first
+        # so innerText is cleaner.  Keep this minimal — the extractor handles
+        # the rest.
         page.evaluate("""
-            const selectors = [
-                'script', 'style', 'nav', 'footer', 'header',
-                '#useful-tools', '.useful-tools',
-                '#s4-breadcrumb', '.breadcrumb', '.ms-breadcrumb',
-                '#sideNavBox', '.ms-quickLaunch', '.ms-nav',
-                '#DeltaTopNavigation', '.ms-topNavContainer'
-            ];
-            for (const sel of selectors) {
-                for (const el of document.querySelectorAll(sel)) {
-                    el.remove();
-                }
-            }
+            for (const el of document.querySelectorAll(
+                'script, style, noscript, iframe, svg'
+            )) { el.remove(); }
         """)
 
         text = page.evaluate("document.body.innerText")
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
+        # Preserve line breaks — only collapse horizontal whitespace
+        text = re.sub(r'[^\S\n]+', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = text.strip()
+
+        return text, html
 
     def extract_links(self, page, current_url):
         """Extract all valid links from rendered page."""
@@ -103,19 +163,23 @@ class AUBLibraryScraper:
         """Scrape a single page using Playwright with retry logic."""
         for attempt in range(MAX_RETRIES):
             try:
-                # Use domcontentloaded instead of networkidle to avoid SharePoint analytics timeout
                 page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
-                page.wait_for_timeout(JS_WAIT_MS)
+                # Smart wait: poll until content stops growing instead of
+                # a fixed sleep.  Handles both fast-loading static pages and
+                # slow JS-rendered SharePoint content.
+                self._wait_for_stable_content(page)
 
                 title = page.title() or url
                 links = self.extract_links(page, url)
-                text = self.extract_text(page)
+                text, html = self.extract_text_and_html(page)
 
+                # No truncation — let the extraction pipeline see everything.
                 if len(text) > 100:
                     self.scraped_data.append({
                         'url': url,
                         'title': title,
-                        'content': text[:5000]
+                        'content': text,
+                        'html': html,
                     })
 
                 return links
@@ -141,8 +205,12 @@ class AUBLibraryScraper:
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            # Set realistic user-agent to avoid bot detection
-            context = browser.new_context(user_agent=USER_AGENT)
+            # Set realistic user-agent and Beirut timezone so JS-rendered
+            # times (e.g. opening hours) display as they appear on the site.
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                timezone_id="Asia/Beirut",
+            )
             page = context.new_page()
 
             while self.to_visit and len(self.visited) < max_pages:
@@ -152,6 +220,7 @@ class AUBLibraryScraper:
                     continue
 
                 self.visited.add(url)
+                self.visited_base.add(self.normalize_url(url))
                 pbar.update(1)
                 pbar.set_postfix({'current': url[:50] + '...' if len(url) > 50 else url})
 
@@ -172,7 +241,7 @@ class AUBLibraryScraper:
 
         # Print failure summary
         if self.failed_pages:
-            print(f"\n⚠️  Failed pages: {len(self.failed_pages)}")
+            print(f"\nFailed pages: {len(self.failed_pages)}")
             print("\nFailed URLs:")
             for failure in self.failed_pages[:10]:  # Show first 10 failures
                 print(f"  - {failure['url']}")
@@ -180,59 +249,31 @@ class AUBLibraryScraper:
             if len(self.failed_pages) > 10:
                 print(f"  ... and {len(self.failed_pages) - 10} more")
         else:
-            print("\n✅ No failed pages!")
+            print("\nNo failed pages!")
 
         return self.scraped_data
 
 
 def build_library_index(scraped_data):
-    """Build ChromaDB collection from scraped library pages."""
+    """Build PostgreSQL tables from scraped data using the full chunk pipeline.
+
+    Truncates and rebuilds both document_chunks and library_pages tables.
+    """
+    from backend.index_builder import IndexBuilder
+
     print("\n" + "="*60)
-    print("Building Library Pages Collection in ChromaDB")
+    print("Building Library Index (chunk pipeline)")
     print("="*60)
 
     print(f"\nTotal pages scraped: {len(scraped_data)}")
+    count = IndexBuilder.build_chunks_from_scraped(scraped_data)
 
-    embedding_fn = OpenAIEmbeddingFunction(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        model_name=EMBEDDING_MODEL,
-    )
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-
-    # Delete existing collection and recreate
-    try:
-        chroma_client.delete_collection(LIBRARY_COLLECTION)
-    except (ValueError, Exception):
-        pass
-
-    collection = chroma_client.create_collection(
-        name=LIBRARY_COLLECTION,
-        embedding_function=embedding_fn,
-        metadata={"hnsw:space": "cosine"},
-    )
-
-    # Upsert in batches
-    batch_size = 50
-    for i in tqdm(range(0, len(scraped_data), batch_size), desc="Upserting to ChromaDB"):
-        batch = scraped_data[i:i + batch_size]
-
-        ids = [f"page_{j}" for j in range(i, i + len(batch))]
-        documents = [f"{item['title']}\n\n{item['content']}" for item in batch]
-        metadatas = [
-            {"url": item["url"], "title": item["title"], "content": item["content"]}
-            for item in batch
-        ]
-
-        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
-
-    count = collection.count()
-    print(f"\nLibrary pages collection saved: {count} entries")
-
+    print(f"\n{count} chunks indexed.")
     print("\n" + "="*60)
-    print("Collection building complete!")
+    print("Index building complete!")
     print("="*60)
 
-    return collection
+    return count
 
 
 def main():
@@ -242,10 +283,13 @@ def main():
     print("="*60)
 
     if not os.environ.get("OPENAI_API_KEY"):
-        print("\n⚠️  Warning: OPENAI_API_KEY environment variable not set!")
+        print("\nWarning: OPENAI_API_KEY environment variable not set!")
         print("Please set it before running this script:")
         print("export OPENAI_API_KEY='your-api-key-here'")
         return
+
+    # Initialize database
+    init_db()
 
     scraper = AUBLibraryScraper(
         start_urls=START_URLS,
@@ -256,14 +300,14 @@ def main():
     scraped_data = scraper.crawl(max_pages=MAX_PAGES)
 
     if not scraped_data:
-        print("\n⚠️  No data scraped! Please check the website URL and configuration.")
+        print("\nNo data scraped! Please check the website URL and configuration.")
         return
 
-    collection = build_library_index(scraped_data)
+    count = build_library_index(scraped_data)
 
-    print("\n✅ All done!")
-    print(f"\nLibrary pages are stored in ChromaDB at: {CHROMA_DIR}")
-    print(f"Collection '{LIBRARY_COLLECTION}' has {collection.count()} entries")
+    print("\nAll done!")
+    print(f"\nLibrary pages are stored in PostgreSQL")
+    print(f"Table 'library_pages' has {count} entries")
 
     print("\n" + "="*60)
     print("Sample of scraped pages:")

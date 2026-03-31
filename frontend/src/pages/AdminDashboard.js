@@ -11,12 +11,21 @@ import {
   updateDatabase,
   deleteDatabase,
   deleteLibraryPage,
+  deleteDocumentChunk,
+  searchDocumentChunks,
   triggerReindex,
+  triggerRescrape,
+  getRescrapeStatus,
   getSystemInfo,
   checkHealth,
   getAnalyticsSummary,
   getAnalyticsTrends,
   getTopQueries,
+  getAnalyticsCharts,
+  getConversations,
+  deleteConversation,
+  submitFeedback,
+  getFeedbackStats,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -39,7 +48,7 @@ function Toast({ message, type, onClose }) {
 // ---------------------------------------------------------------------------
 // System Status Tab
 // ---------------------------------------------------------------------------
-function SystemStatusTab() {
+function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
   const [health, setHealth] = useState(null);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -60,6 +69,15 @@ function SystemStatusTab() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Reload system info when scraping finishes (to update "Last Scrape" timestamp)
+  const prevScraping = React.useRef(scraping);
+  useEffect(() => {
+    if (prevScraping.current && !scraping) {
+      loadData();
+    }
+    prevScraping.current = scraping;
+  }, [scraping, loadData]);
 
   const handleReindex = async () => {
     if (!window.confirm('This will rebuild all collections from CSV source files. Continue?')) return;
@@ -95,12 +113,6 @@ function SystemStatusTab() {
 
       <div className="admin-cards-row">
         <div className="admin-card">
-          <div className="admin-card-label">Backend Status</div>
-          <div className={`admin-status-badge ${health?.status === 'ok' ? 'status-healthy' : 'status-down'}`}>
-            {health?.status === 'ok' ? 'Healthy' : 'Down'}
-          </div>
-        </div>
-        <div className="admin-card">
           <div className="admin-card-label">Server Uptime</div>
           <div className="admin-card-value">{formatUptime(systemInfo?.server_uptime_seconds)}</div>
         </div>
@@ -111,6 +123,10 @@ function SystemStatusTab() {
         <div className="admin-card">
           <div className="admin-card-label">Last Index Build</div>
           <div className="admin-card-value admin-card-value-small">{formatTimestamp(systemInfo?.last_index_build)}</div>
+        </div>
+        <div className="admin-card">
+          <div className="admin-card-label">Last Scrape</div>
+          <div className="admin-card-value admin-card-value-small">{formatTimestamp(systemInfo?.last_scrape)}</div>
         </div>
       </div>
 
@@ -125,17 +141,33 @@ function SystemStatusTab() {
       </div>
 
       <h3 className="admin-section-title">Maintenance</h3>
-      <button
-        className="admin-btn admin-btn-primary"
-        onClick={handleReindex}
-        disabled={reindexing}
-      >
-        {reindexing ? (
-          <span className="admin-btn-loading">Re-indexing...</span>
-        ) : (
-          'Re-index All Collections'
-        )}
-      </button>
+      <div className="admin-maintenance-buttons">
+        <button
+          className="admin-btn admin-btn-primary"
+          onClick={handleReindex}
+          disabled={reindexing || scraping}
+        >
+          {reindexing ? (
+            <span className="admin-btn-loading">Re-indexing...</span>
+          ) : (
+            'Re-index All Collections'
+          )}
+        </button>
+        <button
+          className="admin-btn admin-btn-primary"
+          onClick={onRescrape}
+          disabled={scraping || reindexing}
+        >
+          {scraping ? (
+            <span className="admin-btn-loading">Scraping...</span>
+          ) : (
+            'Re-scrape Library Website'
+          )}
+        </button>
+      </div>
+      {scraping && scrapeMessage && (
+        <div className="admin-scrape-status">{scrapeMessage}</div>
+      )}
     </div>
   );
 }
@@ -143,13 +175,20 @@ function SystemStatusTab() {
 // ---------------------------------------------------------------------------
 // Data Management Tab
 // ---------------------------------------------------------------------------
-function DataManagementTab() {
+function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
   const [activeCollection, setActiveCollection] = useState('faq');
   const [entries, setEntries] = useState([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
+
+  const [reindexing, setReindexing] = useState(false);
+
+  // Document chunks: search + expandable text
+  const [chunkSearch, setChunkSearch] = useState('');
+  const [chunkSearchActive, setChunkSearchActive] = useState(false);
+  const [expandedChunks, setExpandedChunks] = useState(new Set());
 
   // Add/Edit form state
   const [showAddForm, setShowAddForm] = useState(false);
@@ -162,7 +201,12 @@ function DataManagementTab() {
   const loadEntries = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await getCollectionEntries(activeCollection, offset, LIMIT);
+      let data;
+      if (activeCollection === 'document_chunks' && chunkSearchActive && chunkSearch.trim()) {
+        data = await searchDocumentChunks(chunkSearch.trim(), offset, LIMIT);
+      } else {
+        data = await getCollectionEntries(activeCollection, offset, LIMIT);
+      }
       setEntries(data.entries || []);
       setTotal(data.total || 0);
     } catch (err) {
@@ -170,12 +214,15 @@ function DataManagementTab() {
     } finally {
       setLoading(false);
     }
-  }, [activeCollection, offset]);
+  }, [activeCollection, offset, chunkSearchActive, chunkSearch]);
 
   useEffect(() => {
     setOffset(0);
     setShowAddForm(false);
     setEditingId(null);
+    setChunkSearch('');
+    setChunkSearchActive(false);
+    setExpandedChunks(new Set());
   }, [activeCollection]);
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
@@ -234,6 +281,8 @@ function DataManagementTab() {
         await deleteDatabase(id);
       } else if (activeCollection === 'library_pages') {
         await deleteLibraryPage(id);
+      } else if (activeCollection === 'document_chunks') {
+        await deleteDocumentChunk(id);
       }
       setToast({ message: 'Entry deleted successfully.', type: 'success' });
       await loadEntries();
@@ -254,28 +303,136 @@ function DataManagementTab() {
     }
   };
 
+  const handleReindex = async () => {
+    if (!window.confirm('This will rebuild all collections from CSV source files and update embeddings. Continue?')) return;
+    setReindexing(true);
+    try {
+      await triggerReindex();
+      setToast({ message: 'Re-indexing completed successfully. Embeddings are now up to date.', type: 'success' });
+      await loadEntries();
+    } catch (err) {
+      setToast({ message: `Re-index failed: ${err.message}`, type: 'error' });
+    } finally {
+      setReindexing(false);
+    }
+  };
+
+  // Reload entries when scraping finishes
+  const prevScraping = React.useRef(scraping);
+  useEffect(() => {
+    if (prevScraping.current && !scraping) {
+      loadEntries();
+    }
+    prevScraping.current = scraping;
+  }, [scraping, loadEntries]);
+
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
   const field1Label = activeCollection === 'faq' ? 'Question' : 'Name';
   const field2Label = activeCollection === 'faq' ? 'Answer' : 'Description';
-  const canEdit = activeCollection !== 'library_pages';
+  const canEdit = activeCollection !== 'library_pages' && activeCollection !== 'document_chunks';
 
   return (
     <div className="admin-tab-content">
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
 
       <div className="admin-collection-tabs">
-        {['faq', 'databases', 'library_pages'].map((name) => (
+        {['faq', 'databases', 'library_pages', 'document_chunks'].map((name) => (
           <button
             key={name}
             className={`admin-collection-tab ${activeCollection === name ? 'active' : ''}`}
             onClick={() => setActiveCollection(name)}
           >
-            {name === 'faq' ? 'FAQs' : name === 'databases' ? 'Databases' : 'Library Pages'}
+            {name === 'faq' ? 'FAQs' : name === 'databases' ? 'Databases' : name === 'library_pages' ? 'Library Pages' : 'Document Chunks'}
           </button>
         ))}
       </div>
+
+      {activeCollection === 'library_pages' && (
+        <div className="admin-info-note">
+          Library pages are populated automatically by the web scraper. You can delete entries here
+          but cannot add or edit them manually.
+          <button
+            className="admin-btn admin-btn-primary admin-btn-sm"
+            style={{ marginLeft: '0.75rem' }}
+            onClick={onRescrape}
+            disabled={scraping || reindexing}
+          >
+            {scraping ? (
+              <span className="admin-btn-loading">Scraping...</span>
+            ) : (
+              'Re-scrape Library Website'
+            )}
+          </button>
+          {scraping && scrapeMessage && (
+            <div className="admin-scrape-status">{scrapeMessage}</div>
+          )}
+        </div>
+      )}
+
+      {activeCollection === 'document_chunks' && (
+        <>
+          <div className="admin-info-note">
+            Document chunks are semantic segments extracted from scraped library pages. Each chunk contains
+            a portion of page content with metadata about its source page, section, and type.
+            <button
+              className="admin-btn admin-btn-primary admin-btn-sm"
+              style={{ marginLeft: '0.75rem' }}
+              onClick={onRescrape}
+              disabled={scraping || reindexing}
+            >
+              {scraping ? (
+                <span className="admin-btn-loading">Scraping...</span>
+              ) : (
+                'Re-scrape Library Website'
+              )}
+            </button>
+            {scraping && scrapeMessage && (
+              <div className="admin-scrape-status">{scrapeMessage}</div>
+            )}
+          </div>
+          <div className="chunk-search-bar">
+            <input
+              type="text"
+              className="chunk-search-input"
+              placeholder="Search chunk text..."
+              value={chunkSearch}
+              onChange={(e) => setChunkSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && chunkSearch.trim()) {
+                  setOffset(0);
+                  setChunkSearchActive(true);
+                }
+              }}
+            />
+            <button
+              className="admin-btn admin-btn-primary admin-btn-sm"
+              onClick={() => {
+                if (chunkSearch.trim()) {
+                  setOffset(0);
+                  setChunkSearchActive(true);
+                }
+              }}
+              disabled={!chunkSearch.trim()}
+            >
+              Search
+            </button>
+            {chunkSearchActive && (
+              <button
+                className="admin-btn admin-btn-secondary admin-btn-sm"
+                onClick={() => {
+                  setChunkSearch('');
+                  setChunkSearchActive(false);
+                  setOffset(0);
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </>
+      )}
 
       {canEdit && (
         <div className="admin-actions-bar">
@@ -319,7 +476,10 @@ function DataManagementTab() {
       ) : (
         <>
           <div className="admin-table-info">
-            Showing {entries.length} of {total} entries (page {currentPage} of {totalPages || 1})
+            {chunkSearchActive && activeCollection === 'document_chunks'
+              ? `Found ${total} chunks matching "${chunkSearch}" (page ${currentPage} of ${totalPages || 1})`
+              : `Showing ${entries.length} of ${total} entries (page ${currentPage} of ${totalPages || 1})`
+            }
           </div>
           <div className="admin-table-wrapper">
             <table className="admin-table">
@@ -328,7 +488,8 @@ function DataManagementTab() {
                   <th>ID</th>
                   {activeCollection === 'faq' && <><th>Question</th><th>Answer</th></>}
                   {activeCollection === 'databases' && <><th>Name</th><th>Description</th></>}
-                  {activeCollection === 'library_pages' && <><th>Title</th><th>URL</th></>}
+                  {activeCollection === 'library_pages' && <><th>Title</th><th>URL</th><th>Content Preview</th></>}
+                  {activeCollection === 'document_chunks' && <><th>Page Title</th><th>Section</th><th>Type</th><th>Chunk #</th><th>Chunk Text</th></>}
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -410,8 +571,61 @@ function DataManagementTab() {
                               {entry.metadata?.url || ''}
                             </a>
                           </td>
+                          <td>
+                            <span className="admin-td-content-preview">
+                              {entry.metadata?.content
+                                ? entry.metadata.content.substring(0, 150) + (entry.metadata.content.length > 150 ? '...' : '')
+                                : ''}
+                            </span>
+                          </td>
                         </>
                       )}
+
+                      {activeCollection === 'document_chunks' && (() => {
+                        const isExpanded = expandedChunks.has(entry.id);
+                        const text = entry.document || '';
+                        const isLong = text.length > 200;
+                        return (
+                          <>
+                            <td>
+                              <span className="admin-td-text">{entry.metadata?.page_title || ''}</span>
+                            </td>
+                            <td>
+                              <span className="admin-td-text">{entry.metadata?.section_title || '-'}</span>
+                            </td>
+                            <td>
+                              <span className="admin-chunk-type-badge">{entry.metadata?.page_type || 'general'}</span>
+                            </td>
+                            <td className="admin-td-center">{entry.metadata?.chunk_index ?? ''}</td>
+                            <td>
+                              <div className={`chunk-text-cell ${isExpanded ? 'chunk-text-expanded' : ''}`}>
+                                <span className="chunk-text-content">
+                                  {isExpanded ? text : (isLong ? text.substring(0, 200) + '...' : text)}
+                                </span>
+                                {isLong && (
+                                  <button
+                                    className="chunk-expand-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setExpandedChunks(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(entry.id)) {
+                                          next.delete(entry.id);
+                                        } else {
+                                          next.add(entry.id);
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                  >
+                                    {isExpanded ? 'Show less' : 'Show more'}
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </>
+                        );
+                      })()}
 
                       <td className="admin-td-actions">
                         {isEditing ? (
@@ -432,7 +646,7 @@ function DataManagementTab() {
                   );
                 })}
                 {entries.length === 0 && (
-                  <tr><td colSpan={4} className="admin-empty">No entries found.</td></tr>
+                  <tr><td colSpan={activeCollection === 'document_chunks' ? 7 : activeCollection === 'library_pages' ? 5 : 4} className="admin-empty">No entries found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -459,32 +673,54 @@ function DataManagementTab() {
           )}
         </>
       )}
+
+      <div className="admin-reindex-footer">
+        <button
+          className="admin-btn admin-btn-primary"
+          onClick={handleReindex}
+          disabled={reindexing}
+        >
+          {reindexing ? (
+            <span className="admin-btn-loading">Re-indexing...</span>
+          ) : (
+            'Re-index All Collections'
+          )}
+        </button>
+        <span className="admin-reindex-hint">
+          Rebuild embeddings after adding, editing, or deleting entries to update search results.
+        </span>
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Analytics Tab
+// Analytics Tab (with matplotlib charts)
 // ---------------------------------------------------------------------------
+
+
 function AnalyticsTab() {
   const [summary, setSummary] = useState(null);
-  const [trends, setTrends] = useState([]);
   const [topQueries, setTopQueries] = useState([]);
+  const [chartData, setChartData] = useState(null);
+  const [extendedSummary, setExtendedSummary] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [chartsLoading, setChartsLoading] = useState(false);
   const [toast, setToast] = useState(null);
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       try {
-        const [s, t, q] = await Promise.all([
+        const [s, q, c] = await Promise.all([
           getAnalyticsSummary(),
-          getAnalyticsTrends(),
           getTopQueries(),
+          getAnalyticsCharts(),
         ]);
         setSummary(s);
-        setTrends(t);
         setTopQueries(q);
+        setChartData(c.charts || {});
+        setExtendedSummary(c.extended_summary || {});
       } catch (err) {
         setToast({ message: `Failed to load analytics: ${err.message}`, type: 'error' });
       } finally {
@@ -494,18 +730,41 @@ function AnalyticsTab() {
     load();
   }, []);
 
+  const handleRefreshCharts = async () => {
+    setChartsLoading(true);
+    try {
+      const c = await getAnalyticsCharts();
+      setChartData(c.charts || {});
+      setExtendedSummary(c.extended_summary || {});
+      setToast({ message: 'Charts refreshed.', type: 'success' });
+    } catch (err) {
+      setToast({ message: `Failed to refresh charts: ${err.message}`, type: 'error' });
+    } finally {
+      setChartsLoading(false);
+    }
+  };
+
   if (loading) return <div className="admin-loading">Loading analytics...</div>;
 
-  const maxTrendCount = Math.max(1, ...trends.map((t) => t.count));
+  // Flatten all charts from all sections into one list
+  const allCharts = [];
+  if (chartData) {
+    for (const [, sectionCharts] of Object.entries(chartData)) {
+      for (const [key, chart] of Object.entries(sectionCharts)) {
+        allCharts.push({ key, ...chart });
+      }
+    }
+  }
 
   return (
     <div className="admin-tab-content">
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
 
-      <h3 className="admin-section-title">Conversation Summary</h3>
-      <div className="admin-cards-row">
+      {/* ---- Quick Summary Cards ---- */}
+      <h3 className="admin-section-title">Overview</h3>
+      <div className="analytics-summary-cards">
         <div className="admin-card">
-          <div className="admin-card-label">Total Conversations</div>
+          <div className="admin-card-label">Total Queries</div>
           <div className="admin-card-value">{summary?.total_conversations || 0}</div>
         </div>
         <div className="admin-card">
@@ -520,68 +779,52 @@ function AnalyticsTab() {
           <div className="admin-card-label">This Month</div>
           <div className="admin-card-value">{summary?.this_month || 0}</div>
         </div>
-      </div>
-
-      <h3 className="admin-section-title">Language Distribution</h3>
-      <div className="admin-bar-chart">
-        {Object.entries(summary?.language_distribution || {}).map(([lang, pct]) => (
-          <div className="admin-bar-row" key={lang}>
-            <span className="admin-bar-label">{lang === 'en' ? 'English' : lang === 'ar' ? 'Arabic' : lang}</span>
-            <div className="admin-bar-track">
-              <div
-                className="admin-bar-fill admin-bar-fill-primary"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <span className="admin-bar-value">{pct}%</span>
-          </div>
-        ))}
-        {Object.keys(summary?.language_distribution || {}).length === 0 && (
-          <div className="admin-empty">No data yet.</div>
-        )}
-      </div>
-
-      <h3 className="admin-section-title">Intent Distribution</h3>
-      <div className="admin-bar-chart">
-        {Object.entries(summary?.intent_distribution || {}).map(([intent, pct]) => (
-          <div className="admin-bar-row" key={intent}>
-            <span className="admin-bar-label">{intent}</span>
-            <div className="admin-bar-track">
-              <div
-                className="admin-bar-fill admin-bar-fill-accent"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <span className="admin-bar-value">{pct}%</span>
-          </div>
-        ))}
-        {Object.keys(summary?.intent_distribution || {}).length === 0 && (
-          <div className="admin-empty">No data yet.</div>
-        )}
-      </div>
-
-      <h3 className="admin-section-title">Daily Trends (Last 30 Days)</h3>
-      {trends.length > 0 ? (
-        <div className="admin-trends-chart">
-          {trends.map((day) => (
-            <div className="admin-trend-bar-col" key={day.date} title={`${day.date}: ${day.count} conversations`}>
-              <div className="admin-trend-bar-wrapper">
-                <div
-                  className="admin-trend-bar"
-                  style={{ height: `${(day.count / maxTrendCount) * 100}%` }}
-                />
-              </div>
-              <span className="admin-trend-label">
-                {day.date.slice(5)}
-              </span>
-            </div>
-          ))}
+        <div className="admin-card">
+          <div className="admin-card-label">Est. Sessions</div>
+          <div className="admin-card-value">{extendedSummary?.estimated_sessions || 0}</div>
         </div>
-      ) : (
-        <div className="admin-empty">No trend data yet.</div>
-      )}
+        <div className="admin-card">
+          <div className="admin-card-label">Avg Queries/Session</div>
+          <div className="admin-card-value">{extendedSummary?.avg_queries_per_session || 0}</div>
+        </div>
+      </div>
 
-      <h3 className="admin-section-title">Top Queries</h3>
+      {/* ---- Charts ---- */}
+      <div className="analytics-charts-header">
+        <h3 className="admin-section-title" style={{ marginBottom: 0 }}>Visualizations</h3>
+        <button
+          className="admin-btn admin-btn-sm admin-btn-secondary"
+          onClick={handleRefreshCharts}
+          disabled={chartsLoading}
+        >
+          {chartsLoading ? 'Refreshing...' : 'Refresh Charts'}
+        </button>
+      </div>
+
+      <div className="analytics-charts-grid">
+        {allCharts.map((chart) => (
+          <div className="analytics-chart-card" key={chart.key}>
+            <h4 className="analytics-chart-title">{chart.title || chart.key}</h4>
+            {chart.image ? (
+              <img
+                src={`data:image/png;base64,${chart.image}`}
+                alt={chart.title || chart.key}
+                className="analytics-chart-img"
+              />
+            ) : (
+              <div className="admin-empty" style={{ padding: '2rem' }}>Chart not available</div>
+            )}
+          </div>
+        ))}
+        {allCharts.length === 0 && (
+          <div className="admin-empty" style={{ gridColumn: '1 / -1' }}>
+            No chart data available. Send some messages to the chatbot first.
+          </div>
+        )}
+      </div>
+
+      {/* ---- Top Queries Table ---- */}
+      <h3 className="admin-section-title" style={{ marginTop: '2rem' }}>Top Queries</h3>
       {topQueries.length > 0 ? (
         <div className="admin-table-wrapper">
           <table className="admin-table">
@@ -608,18 +851,456 @@ function AnalyticsTab() {
       ) : (
         <div className="admin-empty">No queries recorded yet.</div>
       )}
+
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Main Admin Dashboard
+// Conversations & Feedback Tab
 // ---------------------------------------------------------------------------
-function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState('status');
+function ConversationsTab() {
+  const [conversations, setConversations] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState(null); // null, 'positive', 'negative', 'unreviewed'
+  const [stats, setStats] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  // Expanded row state
+  const [expandedId, setExpandedId] = useState(null);
+
+  // Feedback form state
+  const [feedbackTarget, setFeedbackTarget] = useState(null); // conversation being reviewed
+  const [feedbackRating, setFeedbackRating] = useState(null);
+  const [correctedAnswer, setCorrectedAnswer] = useState('');
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const LIMIT = 20;
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [convData, statsData] = await Promise.all([
+        getConversations(offset, LIMIT, filter),
+        getFeedbackStats(),
+      ]);
+      setConversations(convData.conversations || []);
+      setTotal(convData.total || 0);
+      setStats(statsData);
+    } catch (err) {
+      setToast({ message: `Failed to load conversations: ${err.message}`, type: 'error' });
+    } finally {
+      setLoading(false);
+    }
+  }, [offset, filter]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  useEffect(() => {
+    setOffset(0);
+    setExpandedId(null);
+  }, [filter]);
+
+  const openFeedbackForm = (conv, rating) => {
+    setFeedbackTarget(conv);
+    setFeedbackRating(rating);
+    setCorrectedAnswer('');
+    setFeedbackComment('');
+  };
+
+  const closeFeedbackForm = () => {
+    setFeedbackTarget(null);
+    setFeedbackRating(null);
+    setCorrectedAnswer('');
+    setFeedbackComment('');
+  };
+
+  const handleSubmitFeedback = async () => {
+    if (!feedbackTarget) return;
+    if (feedbackRating === -1 && !correctedAnswer.trim() && !feedbackComment.trim()) {
+      setToast({ message: 'Please provide a corrected answer or comment for negative feedback.', type: 'error' });
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await submitFeedback(
+        feedbackTarget.id,
+        feedbackRating,
+        correctedAnswer.trim() || null,
+        feedbackComment.trim() || null,
+      );
+      setToast({
+        message: feedbackRating === 1 ? 'Marked as good answer.' : 'Feedback submitted. The corrected answer will be used for similar future queries.',
+        type: 'success',
+      });
+      closeFeedbackForm();
+      await loadData();
+    } catch (err) {
+      setToast({ message: `Failed to submit feedback: ${err.message}`, type: 'error' });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDeleteConversation = async (conv) => {
+    if (!window.confirm(`Delete conversation #${conv.id}? This will also remove any feedback. This cannot be undone.`)) return;
+    try {
+      await deleteConversation(conv.id);
+      setToast({ message: 'Conversation deleted.', type: 'success' });
+      if (expandedId === conv.id) setExpandedId(null);
+      await loadData();
+    } catch (err) {
+      setToast({ message: `Failed to delete: ${err.message}`, type: 'error' });
+    }
+  };
+
+  const handleQuickThumbsUp = async (conv) => {
+    try {
+      await submitFeedback(conv.id, 1, null, null);
+      setToast({ message: 'Marked as good answer.', type: 'success' });
+      await loadData();
+    } catch (err) {
+      setToast({ message: `Failed: ${err.message}`, type: 'error' });
+    }
+  };
+
+  const totalPages = Math.ceil(total / LIMIT);
+  const currentPage = Math.floor(offset / LIMIT) + 1;
+
+  const formatDate = (ts) => {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const getRatingBadge = (conv) => {
+    const src = conv.feedback_source === 'user' ? ' (User)' : '';
+    if (conv.rating === 1) return <span className="conv-badge conv-badge-positive">Good{src}</span>;
+    if (conv.rating === -1) return <span className="conv-badge conv-badge-negative">Needs Fix{src}</span>;
+    return <span className="conv-badge conv-badge-unreviewed">Unreviewed</span>;
+  };
 
   return (
-    <div className="app-container" dir="ltr" lang="en">
+    <div className="admin-tab-content">
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+
+      {/* Stats Cards */}
+      {stats && (
+        <div className="admin-cards-row">
+          <div className="admin-card">
+            <div className="admin-card-label">Total Conversations</div>
+            <div className="admin-card-value">{stats.total_conversations}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Reviewed</div>
+            <div className="admin-card-value">{stats.total_reviewed}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Positive</div>
+            <div className="admin-card-value" style={{ color: '#2e7d32' }}>{stats.positive}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Negative</div>
+            <div className="admin-card-value" style={{ color: '#c62828' }}>{stats.negative}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">Unreviewed</div>
+            <div className="admin-card-value">{stats.unreviewed}</div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card-label">With Corrections</div>
+            <div className="admin-card-value">{stats.with_corrections}</div>
+          </div>
+        </div>
+      )}
+
+      <p className="admin-info-note">
+        Review chatbot conversations and provide feedback. Negative feedback with a corrected answer
+        will be used to improve responses for similar future questions.
+      </p>
+
+      {/* Filter Tabs */}
+      <div className="admin-collection-tabs">
+        {[
+          { key: null, label: 'All' },
+          { key: 'unreviewed', label: 'Unreviewed' },
+          { key: 'positive', label: 'Positive' },
+          { key: 'negative', label: 'Negative' },
+          { key: 'user_feedback', label: 'User Feedback' },
+        ].map((f) => (
+          <button
+            key={f.key || 'all'}
+            className={`admin-collection-tab ${filter === f.key ? 'active' : ''}`}
+            onClick={() => setFilter(f.key)}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="admin-loading">Loading conversations...</div>
+      ) : (
+        <>
+          <div className="admin-table-info">
+            Showing {conversations.length} of {total} conversations (page {currentPage} of {totalPages || 1})
+          </div>
+
+          <div className="admin-table-wrapper">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th style={{ width: '50px' }}>#</th>
+                  <th>Question</th>
+                  <th>Answer</th>
+                  <th>Source</th>
+                  <th>Lang</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {conversations.map((conv) => (
+                  <React.Fragment key={conv.id}>
+                    <tr
+                      className={`conv-row ${expandedId === conv.id ? 'conv-row-expanded' : ''}`}
+                      onClick={() => setExpandedId(expandedId === conv.id ? null : conv.id)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <td className="admin-td-id">{conv.id}</td>
+                      <td>
+                        <span className="admin-td-text" dir="auto">{conv.query}</span>
+                      </td>
+                      <td>
+                        <span className="admin-td-text admin-td-truncate" dir="auto">
+                          {conv.answer ? conv.answer.substring(0, 120) + (conv.answer.length > 120 ? '...' : '') : ''}
+                        </span>
+                      </td>
+                      <td className="conv-source-cell">
+                        <span className="conv-source-tag">{conv.chosen_source || 'N/A'}</span>
+                      </td>
+                      <td>{conv.language === 'ar' ? 'AR' : 'EN'}</td>
+                      <td>{getRatingBadge(conv)}</td>
+                      <td className="admin-card-value-small">{formatDate(conv.created_at)}</td>
+                      <td className="admin-td-actions" onClick={(e) => e.stopPropagation()}>
+                        {conv.feedback_source === 'user' && conv.rating === -1 && (
+                          <button
+                            className="admin-btn admin-btn-sm admin-btn-resolve"
+                            title="Resolve user feedback"
+                            onClick={() => openFeedbackForm(conv, -1)}
+                          >
+                            Resolve
+                          </button>
+                        )}
+                        <button
+                          className={`conv-thumb-btn conv-thumb-up ${conv.rating === 1 ? 'conv-thumb-active' : ''}`}
+                          title="Good answer"
+                          onClick={() => handleQuickThumbsUp(conv)}
+                        >
+                          &#x1F44D;
+                        </button>
+                        <button
+                          className={`conv-thumb-btn conv-thumb-down ${conv.rating === -1 ? 'conv-thumb-active' : ''}`}
+                          title="Needs correction"
+                          onClick={() => openFeedbackForm(conv, -1)}
+                        >
+                          &#x1F44E;
+                        </button>
+                        <button
+                          className="admin-btn admin-btn-sm admin-btn-danger"
+                          title="Delete conversation"
+                          onClick={() => handleDeleteConversation(conv)}
+                          style={{ marginLeft: '4px' }}
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+
+                    {/* Expanded Row */}
+                    {expandedId === conv.id && (
+                      <tr className="conv-expanded-row">
+                        <td colSpan={8}>
+                          <div className="conv-expanded-content">
+                            <div className="conv-detail-section">
+                              <h4>Question</h4>
+                              <p dir="auto">{conv.query}</p>
+                            </div>
+                            <div className="conv-detail-section">
+                              <h4>Full Answer</h4>
+                              <p dir="auto" className="conv-full-answer">{conv.answer}</p>
+                            </div>
+                            <div className="conv-detail-meta">
+                              <span>Source: <strong>{conv.chosen_source || 'N/A'}</strong></span>
+                              <span>FAQ Score: <strong>{(conv.faq_top_score * 100).toFixed(0)}%</strong></span>
+                              <span>DB Score: <strong>{(conv.db_top_score * 100).toFixed(0)}%</strong></span>
+                              <span>Library Score: <strong>{(conv.library_top_score * 100).toFixed(0)}%</strong></span>
+                              <span>Response Time: <strong>{conv.response_time_ms?.toFixed(0)}ms</strong></span>
+                            </div>
+                            {conv.corrected_answer && (
+                              <div className="conv-detail-section conv-correction-section">
+                                <h4>
+                                  {conv.feedback_source === 'user' ? 'User Suggested Answer' : 'Admin Corrected Answer'}
+                                </h4>
+                                <p dir="auto">{conv.corrected_answer}</p>
+                                {conv.comment && <p className="conv-comment"><em>Comment: {conv.comment}</em></p>}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                {conversations.length === 0 && (
+                  <tr><td colSpan={8} className="admin-empty">No conversations found.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div className="admin-pagination">
+              <button
+                className="admin-btn admin-btn-sm admin-btn-secondary"
+                disabled={offset === 0}
+                onClick={() => setOffset(Math.max(0, offset - LIMIT))}
+              >
+                Previous
+              </button>
+              <span className="admin-page-info">Page {currentPage} of {totalPages}</span>
+              <button
+                className="admin-btn admin-btn-sm admin-btn-secondary"
+                disabled={offset + LIMIT >= total}
+                onClick={() => setOffset(offset + LIMIT)}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Feedback Modal */}
+      {feedbackTarget && (
+        <div className="conv-modal-overlay" onClick={closeFeedbackForm}>
+          <div className="conv-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="conv-modal-title">
+              {feedbackTarget.feedback_source === 'user' && feedbackTarget.rating === -1
+                ? 'Resolve User Feedback'
+                : feedbackRating === -1
+                  ? 'Provide Correction'
+                  : 'Confirm Positive Feedback'}
+            </h3>
+
+            <div className="conv-modal-section">
+              <label>Original Question:</label>
+              <p dir="auto" className="conv-modal-text">{feedbackTarget.query}</p>
+            </div>
+
+            <div className="conv-modal-section">
+              <label>Chatbot Answer:</label>
+              <p dir="auto" className="conv-modal-text">{feedbackTarget.answer?.substring(0, 500)}</p>
+            </div>
+
+            {/* Show user's comment if resolving user feedback */}
+            {feedbackTarget.feedback_source === 'user' && feedbackTarget.comment && (
+              <div className="conv-modal-section conv-user-comment-section">
+                <label>User Reported:</label>
+                <p dir="auto" className="conv-modal-text conv-user-comment">
+                  {feedbackTarget.comment}
+                </p>
+              </div>
+            )}
+
+            {feedbackRating === -1 && (
+              <>
+                <div className="admin-form-group">
+                  <label>What should the correct answer be?</label>
+                  <textarea
+                    value={correctedAnswer}
+                    onChange={(e) => setCorrectedAnswer(e.target.value)}
+                    rows={5}
+                    placeholder="Type the correct answer that the chatbot should give for this question..."
+                  />
+                </div>
+                <div className="admin-form-group">
+                  <label>Additional comment (optional)</label>
+                  <textarea
+                    value={feedbackComment}
+                    onChange={(e) => setFeedbackComment(e.target.value)}
+                    rows={2}
+                    placeholder="Any notes about why this answer was wrong..."
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="conv-modal-actions">
+              <button
+                className="admin-btn admin-btn-primary"
+                onClick={handleSubmitFeedback}
+                disabled={submitting}
+              >
+                {submitting ? 'Submitting...' : 'Submit Feedback'}
+              </button>
+              <button className="admin-btn admin-btn-secondary" onClick={closeFeedbackForm}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+// Evaluation UI removed. Use backend API: POST /api/admin/evaluation/run
+
+// Main Admin Dashboard
+// ---------------------------------------------------------------------------
+
+function AdminDashboard() {
+  const [activeTab, setActiveTab] = useState('status');
+  const [scraping, setScraping] = useState(false);
+  const [scrapeMessage, setScrapeMessage] = useState('');
+
+  const handleRescrape = useCallback(async () => {
+    if (!window.confirm('This will re-scrape the AUB library website and rebuild library pages and document chunks. This may take several minutes. Continue?')) return;
+    setScraping(true);
+    setScrapeMessage('Starting scrape...');
+    try {
+      await triggerRescrape();
+      const poll = setInterval(async () => {
+        try {
+          const status = await getRescrapeStatus();
+          setScrapeMessage(status.message || 'Scraping...');
+          if (!status.running) {
+            clearInterval(poll);
+            setScraping(false);
+            setScrapeMessage('');
+          }
+        } catch {
+          clearInterval(poll);
+          setScraping(false);
+          setScrapeMessage('');
+        }
+      }, 3000);
+    } catch {
+      setScraping(false);
+      setScrapeMessage('');
+    }
+  }, []);
+
+  return (
+    <div className="app-container admin-page" dir="ltr" lang="en">
       <Header />
 
       <div className="admin-dashboard">
@@ -646,11 +1327,18 @@ function AdminDashboard() {
           >
             Analytics
           </button>
+          <button
+            className={`admin-tab ${activeTab === 'conversations' ? 'active' : ''}`}
+            onClick={() => setActiveTab('conversations')}
+          >
+            Conversations
+          </button>
         </div>
 
-        {activeTab === 'status' && <SystemStatusTab />}
-        {activeTab === 'data' && <DataManagementTab />}
+        {activeTab === 'status' && <SystemStatusTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
+        {activeTab === 'data' && <DataManagementTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
         {activeTab === 'analytics' && <AnalyticsTab />}
+        {activeTab === 'conversations' && <ConversationsTab />}
       </div>
 
       <Footer />

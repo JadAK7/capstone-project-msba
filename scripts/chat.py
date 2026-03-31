@@ -1,20 +1,26 @@
 """
 chat.py
-Library Chatbot with FAQ answers and database recommendations.
-Uses ChromaDB for vector storage and similarity search.
+Library Chatbot.
+Uses PostgreSQL + pgvector for vector storage and similarity search.
 Supports Arabic and English (bilingual).
 """
 
 import os
+import sys
 import re
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+import numpy as np
 from openai import OpenAI
 from typing import List, Optional
 from dataclasses import dataclass
 from enum import Enum
 import logging
 from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from backend.cache import ResponseCache
+from backend.database import init_db, get_connection
+from backend.embeddings import embed_text
 
 # Load environment variables from .env file
 load_dotenv()
@@ -27,7 +33,6 @@ client = OpenAI()
 
 # Configuration
 class Config:
-    CHROMA_DIR = "./chroma_db"
     EMBEDDING_MODEL = "text-embedding-3-small"
 
     FAQ_COLLECTION = "faq"
@@ -40,6 +45,13 @@ class Config:
     DB_MIN_CONFIDENCE = 0.45
     LIBRARY_MIN_CONFIDENCE = 0.35
     BOTH_DELTA = 0.06
+
+    # Cross-lingual penalty: Arabic queries against English-indexed data
+    # typically score 10-20% lower in cosine similarity.
+    CROSS_LINGUAL_THRESHOLD_OFFSET = 0.10
+
+    # Conversation history
+    MAX_HISTORY_TURNS = 5  # Number of recent turns (user+assistant pairs) to include in LLM context
 
     # Supported languages
     LANG_EN = "en"
@@ -103,8 +115,8 @@ class EmbeddingUtils:
         return s
 
 
-def _chroma_distance_to_similarity(distances: List[float]) -> List[float]:
-    """Convert ChromaDB cosine distances to similarity scores."""
+def _pgvector_distance_to_similarity(distances: List[float]) -> List[float]:
+    """Convert pgvector cosine distances to similarity scores."""
     return [1.0 - d for d in distances]
 
 
@@ -193,9 +205,12 @@ class IntentDetector:
 _SYSTEM_PROMPTS = {
     Config.LANG_EN: (
         "You are a helpful AUB library assistant. Answer the student's question "
-        "using ONLY the provided context from the library website. "
+        "using the provided context from the library website. "
+        "If conversation history is present, use it to understand follow-up "
+        "questions (e.g. if the student asks 'how' after asking about borrowing, "
+        "they mean 'how to borrow'). "
         "Be concise and directly answer what was asked. "
-        "If the context doesn't contain the answer, say so."
+        "Use markdown formatting for readability."
     ),
     Config.LANG_AR: (
         "\u0623\u0646\u062A \u0645\u0633\u0627\u0639\u062F \u0645\u0643\u062A\u0628\u0629 "
@@ -203,72 +218,161 @@ _SYSTEM_PROMPTS = {
         "\u0641\u064A \u0628\u064A\u0631\u0648\u062A. "
         "\u0623\u062C\u0628 \u0639\u0644\u0649 \u0633\u0624\u0627\u0644 \u0627\u0644\u0637\u0627\u0644\u0628 "
         "\u0628\u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0627\u0644\u0633\u064A\u0627\u0642 \u0627\u0644\u0645\u0642\u062F\u0645 "
-        "\u0641\u0642\u0637 \u0645\u0646 \u0645\u0648\u0642\u0639 \u0627\u0644\u0645\u0643\u062A\u0628\u0629. "
+        "\u0645\u0646 \u0645\u0648\u0642\u0639 \u0627\u0644\u0645\u0643\u062A\u0628\u0629. "
+        "\u0625\u0630\u0627 \u0643\u0627\u0646 \u0647\u0646\u0627\u0643 \u0633\u062C\u0644 \u0645\u062D\u0627\u062F\u062B\u0629\u060C "
+        "\u0627\u0633\u062A\u062E\u062F\u0645\u0647 \u0644\u0641\u0647\u0645 \u0623\u0633\u0626\u0644\u0629 "
+        "\u0627\u0644\u0645\u062A\u0627\u0628\u0639\u0629. "
         "\u0643\u0646 \u0645\u0648\u062C\u0632\u0627\u064B \u0648\u0623\u062C\u0628 \u0645\u0628\u0627\u0634\u0631\u0629 "
         "\u0639\u0644\u0649 \u0645\u0627 \u062A\u0645 \u0633\u0624\u0627\u0644\u0647. "
-        "\u0625\u0630\u0627 \u0644\u0645 \u064A\u062D\u062A\u0648\u0650 \u0627\u0644\u0633\u064A\u0627\u0642 "
-        "\u0639\u0644\u0649 \u0627\u0644\u0625\u062C\u0627\u0628\u0629\u060C \u0642\u0644 \u0630\u0644\u0643. "
+        "\u0627\u0633\u062A\u062E\u062F\u0645 \u062A\u0646\u0633\u064A\u0642 Markdown \u0644\u0633\u0647\u0648\u0644\u0629 "
+        "\u0627\u0644\u0642\u0631\u0627\u0621\u0629. "
         "\u0623\u062C\u0628 \u0628\u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629."
     ),
 }
 
 
 class LibraryChatbot:
-    """Main chatbot class using ChromaDB for retrieval. Bilingual support."""
+    """Main chatbot class using PostgreSQL + pgvector for retrieval. Bilingual support."""
 
     def __init__(self):
-        embedding_fn = OpenAIEmbeddingFunction(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            model_name=Config.EMBEDDING_MODEL,
-        )
-        chroma_client = chromadb.PersistentClient(path=Config.CHROMA_DIR)
+        self._cache = ResponseCache(max_size=256, ttl_seconds=3600)
 
-        self.faq_collection = chroma_client.get_collection(
-            name=Config.FAQ_COLLECTION,
-            embedding_function=embedding_fn,
-        )
-        self.db_collection = chroma_client.get_collection(
-            name=Config.DB_COLLECTION,
-            embedding_function=embedding_fn,
-        )
-
-        # Load library pages collection if available
+        # Check library pages availability
+        self.library_available = False
         try:
-            self.library_collection = chroma_client.get_collection(
-                name=Config.LIBRARY_COLLECTION,
-                embedding_function=embedding_fn,
-            )
-            if self.library_collection.count() == 0:
-                self.library_collection = None
-            else:
-                logger.info(f"Loaded {self.faq_collection.count()} FAQs, "
-                           f"{self.db_collection.count()} databases, and "
-                           f"{self.library_collection.count()} library pages")
-        except (ValueError, Exception):
-            logger.warning("Library pages collection not found. Run scrape_aub_library.py to create it.")
-            self.library_collection = None
-            logger.info(f"Loaded {self.faq_collection.count()} FAQs and "
-                       f"{self.db_collection.count()} databases")
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM library_pages")
+                    count = cur.fetchone()[0]
+                    if count > 0:
+                        self.library_available = True
+        except Exception:
+            logger.warning("Library pages table not found or empty.")
 
-    def answer(self, query: str) -> str:
+        # Log loaded counts
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM faq")
+                    faq_count = cur.fetchone()[0]
+                    cur.execute("SELECT COUNT(*) FROM databases")
+                    db_count = cur.fetchone()[0]
+                    if self.library_available:
+                        cur.execute("SELECT COUNT(*) FROM library_pages")
+                        lib_count = cur.fetchone()[0]
+                        logger.info(f"Loaded {faq_count} FAQs, {db_count} databases, and {lib_count} library pages")
+                    else:
+                        logger.info(f"Loaded {faq_count} FAQs and {db_count} databases")
+        except Exception:
+            pass
+
+    def _query_table(self, table: str, query: str, n_results: int, metadata_cols: List[str]) -> dict:
+        """Query a pgvector table for nearest neighbors."""
+        query_embedding = embed_text(query)
+        query_vec = np.array(query_embedding)
+
+        cols = ", ".join(metadata_cols)
+        sql = (
+            f"SELECT id, embedding <=> %s AS distance, {cols} "
+            f"FROM {table} "
+            f"ORDER BY embedding <=> %s "
+            f"LIMIT %s"
+        )
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (query_vec, query_vec, n_results))
+                rows = cur.fetchall()
+
+        ids = []
+        distances = []
+        metadatas = []
+        for row in rows:
+            ids.append(row[0])
+            distances.append(float(row[1]))
+            meta = {col: row[2 + i] for i, col in enumerate(metadata_cols)}
+            metadatas.append(meta)
+
+        return {
+            "ids": [ids],
+            "distances": [distances],
+            "metadatas": [metadatas],
+        }
+
+    @staticmethod
+    def _build_search_query(query: str, history: Optional[List[dict]] = None) -> str:
+        """Build a context-enriched query for retrieval."""
+        if not history or len(query.split()) > 4:
+            return query
+
+        last_user_msg = None
+        for entry in reversed(history):
+            if isinstance(entry, dict) and entry.get("role") == "user":
+                last_user_msg = entry.get("content", "")
+                break
+
+        if last_user_msg and last_user_msg.strip():
+            return f"{last_user_msg} {query}"
+        return query
+
+    @staticmethod
+    def _build_history_messages(history: Optional[List[dict]] = None) -> List[dict]:
+        """Sanitize and truncate conversation history for LLM context."""
+        if not history:
+            return []
+
+        valid_roles = {"user", "assistant"}
+        cleaned = []
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            role = entry.get("role", "")
+            content = entry.get("content", "")
+            if role in valid_roles and isinstance(content, str) and content.strip():
+                cleaned.append({"role": role, "content": content})
+
+        # Keep only the last MAX_HISTORY_TURNS turns (each turn = 2 messages)
+        max_entries = Config.MAX_HISTORY_TURNS * 2
+        if len(cleaned) > max_entries:
+            cleaned = cleaned[-max_entries:]
+
+        return cleaned
+
+    def answer(self, query: str, history: Optional[List[dict]] = None) -> str:
         """Generate answer for user query. Auto-detects language."""
         lang = LanguageDetector.detect(query)
 
-        # Query all collections (ChromaDB handles embedding)
-        faq_results = self.faq_collection.query(query_texts=[query], n_results=5)
-        db_results = self.db_collection.query(query_texts=[query], n_results=5)
+        search_query = self._build_search_query(query, history)
+
+        # --- Cache lookup ---
+        cache_key = (search_query, lang)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # --- Cache miss: full retrieval + generation pipeline ---
+
+        cross_offset = (
+            Config.CROSS_LINGUAL_THRESHOLD_OFFSET
+            if lang == Config.LANG_AR
+            else 0.0
+        )
+
+        # Query all tables
+        faq_results = self._query_table("faq", search_query, 5, ["question", "answer"])
+        db_results = self._query_table("databases", search_query, 5, ["name", "description"])
 
         library_results = None
-        if self.library_collection is not None:
-            library_results = self.library_collection.query(query_texts=[query], n_results=3)
+        if self.library_available:
+            library_results = self._query_table("library_pages", search_query, 3, ["url", "title", "content"])
 
         # Convert distances to similarity scores
-        faq_scores = _chroma_distance_to_similarity(faq_results["distances"][0])
-        db_scores = _chroma_distance_to_similarity(db_results["distances"][0])
+        faq_scores = _pgvector_distance_to_similarity(faq_results["distances"][0])
+        db_scores = _pgvector_distance_to_similarity(db_results["distances"][0])
 
         library_scores = []
         if library_results is not None:
-            library_scores = _chroma_distance_to_similarity(library_results["distances"][0])
+            library_scores = _pgvector_distance_to_similarity(library_results["distances"][0])
 
         best_faq_score = faq_scores[0] if faq_scores else 0.0
         best_db_score = db_scores[0] if db_scores else 0.0
@@ -276,41 +380,74 @@ class LibraryChatbot:
         # Detect intent
         intent = IntentDetector.detect(query)
 
-        # Determine response strategy
-        show_faq = best_faq_score >= Config.FAQ_MIN_CONFIDENCE
+        # Determine response strategy (with cross-lingual offset for Arabic)
+        show_faq = best_faq_score >= (Config.FAQ_MIN_CONFIDENCE - cross_offset)
         show_db = (
             intent == IntentType.DATABASE or
-            best_db_score >= Config.DB_MIN_CONFIDENCE
+            best_db_score >= (Config.DB_MIN_CONFIDENCE - cross_offset)
         )
         show_library = False
         if library_scores:
-            show_library = library_scores[0] >= Config.LIBRARY_MIN_CONFIDENCE
+            show_library = library_scores[0] >= (Config.LIBRARY_MIN_CONFIDENCE - cross_offset)
 
         # 1. Database intent -> always use database recommendations
         if show_db and intent == IntentType.DATABASE:
-            return self._format_db_recommendations(db_results, db_scores, lang, k=5)
+            result = self._format_db_recommendations(db_results, db_scores, lang, k=5)
+            self._cache.put(cache_key, result)
+            return result
 
         # 2. Scraped library pages -> primary source for non-DB questions
         if show_library:
-            return self._format_library_answer(query, library_results, library_scores, lang, k=3)
+            result = self._format_library_answer(search_query, library_results, library_scores, lang, k=3, history=history)
+            self._cache.put(cache_key, result)
+            return result
 
         # 3. FAQ -> backup if scraped data didn't match
         if show_faq:
-            return self._format_faq_answer(faq_results, lang)
+            result = self._format_faq_answer(faq_results, lang, search_query, history=history)
+            self._cache.put(cache_key, result)
+            return result
 
         # 4. Database recommendations by semantic score (no keyword intent)
         if show_db:
-            return self._format_db_recommendations(db_results, db_scores, lang, k=5)
+            result = self._format_db_recommendations(db_results, db_scores, lang, k=5)
+            self._cache.put(cache_key, result)
+            return result
 
         # 5. Nothing matched
-        return self._format_unclear(lang)
+        result = self._format_unclear(lang)
+        self._cache.put(cache_key, result)
+        return result
 
-    def _format_faq_answer(self, results: dict, lang: str) -> str:
-        """Format FAQ answer."""
-        answer = results["metadatas"][0][0]["answer"]
-        if lang == Config.LANG_AR:
-            answer = self._translate_to_arabic(answer)
-        return answer
+    def _format_faq_answer(self, results: dict, lang: str, query: str = "", history: Optional[List[dict]] = None) -> str:
+        """Format FAQ answer using the LLM for a natural, readable response."""
+        raw_answer = results["metadatas"][0][0]["answer"]
+        question = results["metadatas"][0][0].get("question", query)
+
+        system_prompt = _SYSTEM_PROMPTS[lang]
+        history_msgs = self._build_history_messages(history)
+
+        try:
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(history_msgs)
+            messages.append({
+                "role": "user",
+                "content": f"Context:\nFAQ Question: {question}\nFAQ Answer: {raw_answer}\n\nQuestion: {query}",
+            })
+
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.2,
+                max_tokens=500,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            logger.error(f"LLM formatting of FAQ answer failed: {e}")
+            answer = raw_answer
+            if lang == Config.LANG_AR:
+                answer = self._translate_to_arabic(answer)
+            return answer
 
     def _format_db_recommendations(
         self, results: dict, scores: List[float], lang: str, k: int = 5
@@ -347,6 +484,7 @@ class LibraryChatbot:
         scores: List[float],
         lang: str,
         k: int = 3,
+        history: Optional[List[dict]] = None,
     ) -> str:
         """Use the LLM to synthesize a clean answer from retrieved library pages."""
         context_parts = []
@@ -360,19 +498,18 @@ class LibraryChatbot:
         context = "\n\n---\n\n".join(context_parts)
 
         system_prompt = _SYSTEM_PROMPTS[lang]
+        history_msgs = self._build_history_messages(history)
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history_msgs)
+        messages.append({
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {query}",
+        })
 
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nQuestion: {query}",
-                },
-            ],
+            messages=messages,
             temperature=0.2,
             max_tokens=500,
         )
@@ -463,10 +600,13 @@ def main():
     print("Type 'quit' or 'exit' to end the conversation.\n")
 
     try:
+        init_db()
         bot = LibraryChatbot()
     except Exception as e:
         print(f"Error loading chatbot: {e}")
         return
+
+    history = []  # Conversation history for follow-up context
 
     while True:
         try:
@@ -484,8 +624,16 @@ def main():
                       "\u0645\u0639 \u0627\u0644\u0633\u0644\u0627\u0645\u0629!")
                 break
 
-            answer = bot.answer(query)
+            answer = bot.answer(query, history=history)
             print(f"\nBot:\n{answer}")
+
+            # Update conversation history
+            history.append({"role": "user", "content": query})
+            history.append({"role": "assistant", "content": answer})
+            # Keep only the last MAX_HISTORY_TURNS turns
+            max_entries = Config.MAX_HISTORY_TURNS * 2
+            if len(history) > max_entries:
+                history = history[-max_entries:]
 
         except KeyboardInterrupt:
             print("\n\nGoodbye!")

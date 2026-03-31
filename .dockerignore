@@ -1,0 +1,13 @@
+node_modules
+frontend/node_modules
+frontend/build
+__pycache__
+*.pyc
+.env
+.git
+.gitignore
+*.md
+chat_logs.json
+venv
+.venv
+chroma_db
