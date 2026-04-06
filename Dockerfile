@@ -4,6 +4,8 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
 COPY frontend/ ./
+# Bust cache so npm run build always runs with latest source
+ARG CACHEBUST=1
 RUN npm run build
 
 # Stage 2: Python backend + built frontend

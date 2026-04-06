@@ -13,11 +13,15 @@ import {
   deleteLibraryPage,
   deleteDocumentChunk,
   searchDocumentChunks,
+  addCustomNote,
+  updateCustomNote,
+  deleteCustomNote,
   triggerReindex,
   triggerRescrape,
   getRescrapeStatus,
   getSystemInfo,
   checkHealth,
+  clearCache,
   getAnalyticsSummary,
   getAnalyticsTrends,
   getTopQueries,
@@ -26,6 +30,7 @@ import {
   deleteConversation,
   submitFeedback,
   getFeedbackStats,
+  deleteAllFeedback,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +58,8 @@ function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [reindexing, setReindexing] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [deletingFeedback, setDeletingFeedback] = useState(false);
   const [toast, setToast] = useState(null);
 
   const loadData = useCallback(async () => {
@@ -164,6 +171,49 @@ function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
             'Re-scrape Library Website'
           )}
         </button>
+        <button
+          className="admin-btn admin-btn-secondary"
+          onClick={async () => {
+            setClearingCache(true);
+            try {
+              await clearCache();
+              setToast({ message: 'Response cache cleared.', type: 'success' });
+            } catch (err) {
+              setToast({ message: `Failed to clear cache: ${err.message}`, type: 'error' });
+            } finally {
+              setClearingCache(false);
+            }
+          }}
+          disabled={clearingCache}
+        >
+          {clearingCache ? (
+            <span className="admin-btn-loading">Clearing...</span>
+          ) : (
+            'Clear Response Cache'
+          )}
+        </button>
+        <button
+          className="admin-btn admin-btn-danger"
+          onClick={async () => {
+            if (!window.confirm('This will delete ALL admin feedback entries and clear the cache. Continue?')) return;
+            setDeletingFeedback(true);
+            try {
+              const res = await deleteAllFeedback();
+              setToast({ message: `All feedback deleted (${res.deleted} entries removed).`, type: 'success' });
+            } catch (err) {
+              setToast({ message: `Failed to delete feedback: ${err.message}`, type: 'error' });
+            } finally {
+              setDeletingFeedback(false);
+            }
+          }}
+          disabled={deletingFeedback}
+        >
+          {deletingFeedback ? (
+            <span className="admin-btn-loading">Deleting...</span>
+          ) : (
+            'Delete All Feedback'
+          )}
+        </button>
       </div>
       {scraping && scrapeMessage && (
         <div className="admin-scrape-status">{scrapeMessage}</div>
@@ -244,6 +294,8 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
         await addFAQ(formField1, formField2);
       } else if (activeCollection === 'databases') {
         await addDatabase(formField1, formField2);
+      } else if (activeCollection === 'custom_notes') {
+        await addCustomNote(formField1, formField2);
       }
       setToast({ message: 'Entry added successfully.', type: 'success' });
       resetForm();
@@ -263,6 +315,8 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
         await updateFAQ(id, formField1, formField2);
       } else if (activeCollection === 'databases') {
         await updateDatabase(id, formField1, formField2);
+      } else if (activeCollection === 'custom_notes') {
+        await updateCustomNote(id, formField1, formField2);
       }
       setToast({ message: 'Entry updated successfully.', type: 'success' });
       resetForm();
@@ -279,6 +333,8 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
         await deleteFAQ(id);
       } else if (activeCollection === 'databases') {
         await deleteDatabase(id);
+      } else if (activeCollection === 'custom_notes') {
+        await deleteCustomNote(id);
       } else if (activeCollection === 'library_pages') {
         await deleteLibraryPage(id);
       } else if (activeCollection === 'document_chunks') {
@@ -300,6 +356,9 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
     } else if (activeCollection === 'databases') {
       setFormField1(entry.metadata?.name || '');
       setFormField2(entry.metadata?.description || '');
+    } else if (activeCollection === 'custom_notes') {
+      setFormField1(entry.metadata?.label || '');
+      setFormField2(entry.metadata?.content || '');
     }
   };
 
@@ -329,8 +388,8 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
-  const field1Label = activeCollection === 'faq' ? 'Question' : 'Name';
-  const field2Label = activeCollection === 'faq' ? 'Answer' : 'Description';
+  const field1Label = activeCollection === 'faq' ? 'Question' : activeCollection === 'custom_notes' ? 'Label' : 'Name';
+  const field2Label = activeCollection === 'faq' ? 'Answer' : activeCollection === 'custom_notes' ? 'Content' : 'Description';
   const canEdit = activeCollection !== 'library_pages' && activeCollection !== 'document_chunks';
 
   return (
@@ -338,13 +397,13 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
 
       <div className="admin-collection-tabs">
-        {['faq', 'databases', 'library_pages', 'document_chunks'].map((name) => (
+        {['faq', 'databases', 'custom_notes', 'library_pages', 'document_chunks'].map((name) => (
           <button
             key={name}
             className={`admin-collection-tab ${activeCollection === name ? 'active' : ''}`}
             onClick={() => setActiveCollection(name)}
           >
-            {name === 'faq' ? 'FAQs' : name === 'databases' ? 'Databases' : name === 'library_pages' ? 'Library Pages' : 'Document Chunks'}
+            {name === 'faq' ? 'FAQs' : name === 'databases' ? 'Databases' : name === 'custom_notes' ? 'Custom Notes' : name === 'library_pages' ? 'Library Pages' : 'Document Chunks'}
           </button>
         ))}
       </div>
@@ -440,7 +499,7 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
             className="admin-btn admin-btn-primary"
             onClick={() => { setShowAddForm(!showAddForm); setEditingId(null); setFormField1(''); setFormField2(''); }}
           >
-            {showAddForm ? 'Cancel' : `Add New ${activeCollection === 'faq' ? 'FAQ' : 'Database'}`}
+            {showAddForm ? 'Cancel' : `Add New ${activeCollection === 'faq' ? 'FAQ' : activeCollection === 'custom_notes' ? 'Note' : 'Database'}`}
           </button>
         </div>
       )}
@@ -488,6 +547,7 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
                   <th>ID</th>
                   {activeCollection === 'faq' && <><th>Question</th><th>Answer</th></>}
                   {activeCollection === 'databases' && <><th>Name</th><th>Description</th></>}
+                  {activeCollection === 'custom_notes' && <><th>Label</th><th>Content</th></>}
                   {activeCollection === 'library_pages' && <><th>Title</th><th>URL</th><th>Content Preview</th></>}
                   {activeCollection === 'document_chunks' && <><th>Page Title</th><th>Section</th><th>Type</th><th>Chunk #</th><th>Chunk Text</th></>}
                   <th>Actions</th>
@@ -553,6 +613,35 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
                               />
                             ) : (
                               <span className="admin-td-text admin-td-truncate">{entry.metadata?.description || ''}</span>
+                            )}
+                          </td>
+                        </>
+                      )}
+
+                      {activeCollection === 'custom_notes' && (
+                        <>
+                          <td>
+                            {isEditing ? (
+                              <textarea
+                                className="admin-inline-edit"
+                                value={formField1}
+                                onChange={(e) => setFormField1(e.target.value)}
+                                rows={1}
+                              />
+                            ) : (
+                              <span className="admin-td-text">{entry.metadata?.label || ''}</span>
+                            )}
+                          </td>
+                          <td>
+                            {isEditing ? (
+                              <textarea
+                                className="admin-inline-edit"
+                                value={formField2}
+                                onChange={(e) => setFormField2(e.target.value)}
+                                rows={4}
+                              />
+                            ) : (
+                              <span className="admin-td-text admin-td-truncate">{entry.metadata?.content || ''}</span>
                             )}
                           </td>
                         </>
@@ -647,6 +736,7 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
                 })}
                 {entries.length === 0 && (
                   <tr><td colSpan={activeCollection === 'document_chunks' ? 7 : activeCollection === 'library_pages' ? 5 : 4} className="admin-empty">No entries found.</td></tr>
+
                 )}
               </tbody>
             </table>
