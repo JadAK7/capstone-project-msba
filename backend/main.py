@@ -13,9 +13,10 @@ from typing import Optional, List
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 import json as _json
@@ -108,6 +109,11 @@ class FAQRequest(BaseModel):
 class DatabaseRequest(BaseModel):
     name: str
     description: str
+
+
+class CustomNoteRequest(BaseModel):
+    label: str
+    content: str
 
 
 class FeedbackRequest(BaseModel):
@@ -254,7 +260,7 @@ def admin_list_collections():
 @app.get("/api/admin/collections/{collection_name}/entries")
 def admin_get_entries(collection_name: str, offset: int = 0, limit: int = 20):
     """Return paginated entries from a collection."""
-    valid_names = ["faq", "databases", "library_pages", "document_chunks"]
+    valid_names = ["faq", "databases", "library_pages", "document_chunks", "custom_notes"]
     if collection_name not in valid_names:
         raise HTTPException(
             status_code=400,
@@ -355,6 +361,46 @@ def admin_delete_database(entry_id: str):
         return mgr.delete_database(entry_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints -- Custom Notes CRUD
+# ---------------------------------------------------------------------------
+
+@app.post("/api/admin/custom-note")
+def admin_add_custom_note(req: CustomNoteRequest):
+    """Add a new custom note entry."""
+    if not req.label.strip() or not req.content.strip():
+        raise HTTPException(status_code=400, detail="Label and content are required.")
+    try:
+        mgr = get_admin_manager()
+        return mgr.add_custom_note(req.label.strip(), req.content.strip())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/admin/custom-note/{entry_id}")
+def admin_update_custom_note(entry_id: str, req: CustomNoteRequest):
+    """Update an existing custom note entry."""
+    if not req.label.strip() or not req.content.strip():
+        raise HTTPException(status_code=400, detail="Label and content are required.")
+    try:
+        mgr = get_admin_manager()
+        return mgr.update_custom_note(entry_id, req.label.strip(), req.content.strip())
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/custom-note/{entry_id}")
+def admin_delete_custom_note(entry_id: str):
+    """Delete a custom note entry."""
+    try:
+        mgr = get_admin_manager()
+        return mgr.delete_custom_note(entry_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -485,6 +531,18 @@ def admin_cache_stats():
     try:
         bot = get_chatbot()
         return bot.cache_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/clear-cache")
+def admin_clear_cache():
+    """Clear the response cache."""
+    try:
+        bot = get_chatbot()
+        bot.clear_cache()
+        logger.info("Response cache cleared via admin endpoint")
+        return {"status": "ok", "message": "Cache cleared successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -813,6 +871,24 @@ def delete_conversation(conversation_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/api/admin/feedback/all")
+def delete_all_feedback():
+    """Delete all feedback entries and clear response cache."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM chat_feedback")
+                count = cur.rowcount
+            conn.commit()
+        # Clear cache so stale feedback-based answers aren't served
+        bot = get_chatbot()
+        bot.clear_cache()
+        logger.info(f"All feedback deleted: {count} entries removed, cache cleared")
+        return {"status": "ok", "deleted": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/api/admin/feedback/{feedback_id}")
 def delete_feedback(feedback_id: int):
     """Delete a feedback entry."""
@@ -931,4 +1007,29 @@ def evaluate_single_question(req: SingleEvalRequest):
 
 _frontend_build = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "build")
 if os.path.isdir(_frontend_build):
-    app.mount("/", StaticFiles(directory=_frontend_build, html=True), name="frontend")
+
+    @app.middleware("http")
+    async def no_cache_html(request: Request, call_next):
+        response: Response = await call_next(request)
+        # Prevent Safari (and other browsers) from caching index.html
+        # JS/CSS files have content hashes in their filenames so caching those is fine
+        if request.url.path == "/" or request.url.path.endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+    from fastapi.responses import FileResponse
+
+    # Serve static assets (JS, CSS, images) directly
+    app.mount("/static", StaticFiles(directory=os.path.join(_frontend_build, "static")), name="static")
+
+    # Catch-all: serve index.html for any non-API route (React client-side routing)
+    @app.get("/{full_path:path}")
+    async def serve_react(full_path: str):
+        # If the path points to an actual file in build/, serve it
+        file_path = os.path.join(_frontend_build, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        # Otherwise serve index.html — React Router handles the route
+        return FileResponse(os.path.join(_frontend_build, "index.html"))

@@ -27,6 +27,10 @@ from .retriever import hybrid_retrieve, classify_query_intent
 from .reranker import rerank, _get_chunk_text
 from .input_guard import run_input_guards, get_refusal_message
 from .query_rewriter import rewrite_query
+from .source_config import (
+    SOURCE_CONFIG, get_source_type, get_source_trust,
+    FACULTY_TEXT, SCRAPED_WEBSITE, FACULTY_FAQ, DATABASES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +492,20 @@ class LibraryChatbot:
             )
             return refusal, debug
 
+        # --- Early cache check on original query (before LLM rewrite) ---
+        # This avoids a wasted LLM call when the same query is repeated.
+        # Feedback must still override cache, so check feedback first.
+        feedback = self._lookup_feedback(query)
+
+        original_cache_key = (query.strip().lower(), lang)
+        if not feedback:
+            cached = self._cache.get(original_cache_key)
+            if cached is not None:
+                answer, debug = cached
+                debug = dict(debug)
+                debug["cache_hit"] = True
+                return answer, debug
+
         # --- 2. Query rewriting (LLM-based) ---
         # Rewritten query is English, self-contained, optimized for retrieval.
         # Original query is preserved for answer generation (to match user's language).
@@ -495,16 +513,12 @@ class LibraryChatbot:
             query=query, history=history, lang=lang,
         )
 
-        # --- Check for admin feedback FIRST (before cache) ---
-        # Feedback must override cache, otherwise a stale cached answer
-        # could be served even after an admin corrected it.
-        # Search on BOTH original and rewritten query for best match.
-        feedback = self._lookup_feedback(query)
+        # --- Check for admin feedback on rewritten query too ---
         if not feedback:
             feedback = self._lookup_feedback(rewritten_query)
 
-        # --- Cache lookup (keyed on rewritten query + language) ---
-        # Skip cache if feedback exists (feedback always takes priority).
+        # --- Secondary cache lookup (keyed on rewritten query + language) ---
+        # Catches cases where different phrasings rewrite to the same query.
         cache_key = (rewritten_query, lang)
         if not feedback:
             cached = self._cache.get(cache_key)
@@ -512,7 +526,14 @@ class LibraryChatbot:
                 answer, debug = cached
                 debug = dict(debug)
                 debug["cache_hit"] = True
+                # Also store under original key so next identical query hits early cache
+                self._cache.put(original_cache_key, cached)
                 return answer, debug
+
+        # Helper to store result under both cache keys
+        def _cache_result(result):
+            self._cache.put(cache_key, result)
+            self._cache.put(original_cache_key, result)
 
         # --- 3. Intent classification → pre-filtering ---
         intent_info = classify_query_intent(rewritten_query)
@@ -530,6 +551,10 @@ class LibraryChatbot:
         # Always include document_chunks if not already present
         if "document_chunks" not in search_tables:
             search_tables.append("document_chunks")
+
+        # Always include custom_notes if not already present
+        if "custom_notes" not in search_tables:
+            search_tables.append("custom_notes")
 
         # --- 4. Hybrid retrieval with pre-filtering ---
         raw_candidates = hybrid_retrieve(
@@ -562,7 +587,7 @@ class LibraryChatbot:
             min_score=0.45,
         )
 
-        # Build retrieved_chunks for logging/debug
+        # Build retrieved_chunks for logging/debug — now includes source_type
         retrieved_chunks = []
         for cand in reranked:
             text = _get_chunk_text(cand)
@@ -570,7 +595,11 @@ class LibraryChatbot:
             source_label = cand.get("source_label", cand.get("source_table", "unknown"))
             retrieved_chunks.append({
                 "source": source_label,
+                "source_type": cand.get("source_type", get_source_type(cand.get("source_table", ""))),
+                "source_trust": cand.get("source_trust", 0.0),
                 "score": cand.get("rerank_score", cand.get("rrf_score", 0.0)),
+                "raw_rerank_score": cand.get("raw_rerank_score", 0.0),
+                "source_boost": cand.get("source_boost", 0.0),
                 "vector_score": cand.get("vector_score", 0.0),
                 "keyword_score": cand.get("keyword_score", 0.0),
                 "text": text[:3000],
@@ -579,14 +608,36 @@ class LibraryChatbot:
                 "section_title": meta.get("section_title", ""),
             })
 
-        # Classify best sources
-        best_faq = max((c for c in reranked if c.get("source_table") == "faq"), key=lambda x: x.get("rerank_score", 0), default=None)
-        best_db = max((c for c in reranked if c.get("source_table") == "databases"), key=lambda x: x.get("rerank_score", 0), default=None)
-        best_lib = max((c for c in reranked if c.get("source_table") in ("library_pages", "document_chunks")), key=lambda x: x.get("rerank_score", 0), default=None)
+        # Group all reranked candidates by source type with full details
+        hits_by_source = {}
+        for cand in reranked:
+            st = cand.get("source_type", get_source_type(cand.get("source_table", "")))
+            meta = cand.get("metadata", {})
+            text = _get_chunk_text(cand)
+            entry = {
+                "score": round(cand.get("rerank_score", 0), 4),
+                "raw_score": round(cand.get("raw_rerank_score", 0), 4),
+                "boost": round(cand.get("source_boost", 0), 4),
+                "vector_score": round(cand.get("vector_score", 0), 4),
+                "title": meta.get("page_title", meta.get("title", meta.get("label", meta.get("question", "")))),
+                "text_preview": text[:200],
+            }
+            if st not in hits_by_source:
+                hits_by_source[st] = []
+            hits_by_source[st].append(entry)
 
-        best_faq_score = best_faq.get("rerank_score", 0) if best_faq else 0.0
-        best_db_score = best_db.get("rerank_score", 0) if best_db else 0.0
-        best_lib_score = best_lib.get("rerank_score", 0) if best_lib else 0.0
+        # Best score per source type
+        best_by_source = {}
+        for st, hits in hits_by_source.items():
+            best_by_source[st] = {"score": hits[0]["score"]} if hits else {"score": 0.0}
+
+        best_faq_score = best_by_source.get(FACULTY_FAQ, {}).get("score", 0.0)
+        best_db_score = best_by_source.get(DATABASES, {}).get("score", 0.0)
+        best_lib_score = max(
+            best_by_source.get(SCRAPED_WEBSITE, {}).get("score", 0.0),
+            best_by_source.get(FACULTY_TEXT, {}).get("score", 0.0),
+        )
+        best_faculty_text_score = best_by_source.get(FACULTY_TEXT, {}).get("score", 0.0)
 
         debug = {
             # Query pipeline
@@ -596,26 +647,19 @@ class LibraryChatbot:
             "query_intent": intent_info["intent"],
             "search_tables": search_tables,
             "page_type_filter": intent_info.get("page_types"),
-            # Scores
-            "faq_scores": [[c.get("id", ""), c.get("rerank_score", 0)] for c in reranked if c.get("source_table") == "faq"],
-            "db_scores": [[c.get("id", ""), c.get("rerank_score", 0)] for c in reranked if c.get("source_table") == "databases"],
-            "library_scores": [[c.get("id", ""), c.get("rerank_score", 0)] for c in reranked if c.get("source_table") in ("library_pages", "document_chunks")],
             "is_db_intent": is_db_intent,
-            "show_faq": best_faq_score > 0,
-            "show_db": is_db_intent or best_db_score > 0,
-            "show_library": best_lib_score > 0,
             "library_available": self.library_available,
             "chosen_source": None,
             "detected_language": lang,
             "cache_hit": False,
-            "faq_metadatas": [c.get("metadata", {}) for c in reranked if c.get("source_table") == "faq"][:5],
-            "db_metadatas": [c.get("metadata", {}) for c in reranked if c.get("source_table") == "databases"][:5],
-            "library_metadatas": [c.get("metadata", {}) for c in reranked if c.get("source_table") in ("library_pages", "document_chunks")][:5],
             "retrieved_chunks": retrieved_chunks,
             "search_query": rewritten_query,
-            "pipeline": "hybrid_retrieval_v3",
+            "pipeline": "hybrid_retrieval_v4",
             "total_candidates": len(raw_candidates),
             "reranked_count": len(reranked),
+            # Per-source top hits with full score breakdown
+            "hits_by_source": hits_by_source,
+            "best_by_source": best_by_source,
         }
 
         # --- Admin feedback takes highest priority ---
@@ -630,7 +674,7 @@ class LibraryChatbot:
                     lang=lang, history=history,
                 )
                 result = (formatted, debug)
-                self._cache.put(cache_key, result)
+                _cache_result(result)
                 return result
             elif feedback["rating"] == 1 and feedback.get("original_answer"):
                 # Positive feedback: the original answer was confirmed good.
@@ -642,7 +686,7 @@ class LibraryChatbot:
                     lang=lang, history=history,
                 )
                 result = (formatted, debug)
-                self._cache.put(cache_key, result)
+                _cache_result(result)
                 return result
 
         # --- Database intent routing ---
@@ -650,52 +694,55 @@ class LibraryChatbot:
             debug["chosen_source"] = "database (keyword intent)"
             db_candidates = [c for c in reranked if c.get("source_table") == "databases"]
             result = (self._format_db_recommendations(db_candidates, lang, k=5), debug)
-            self._cache.put(cache_key, result)
+            _cache_result(result)
             return result
 
-        # --- 6. Use top reranked chunks for grounded answer ---
-        # The reranker now scores EVIDENCE SUPPORT (not just relevance).
-        # A passage about "library hours" that doesn't give actual times
-        # scores ~0.4 under the new prompt.  Only passages with quotable
-        # facts score 0.6+.
+        # --- 6. Source-priority-aware chunk selection for grounded answer ---
         #
-        # Thresholds:
-        #   >= 0.6   → confident (context contains specific evidence)
-        #   0.45-0.6 → partial (related but may lack specifics)
-        #   < 0.45   → abstain
-        CONFIDENT_THRESHOLD = 0.60
-        PARTIAL_THRESHOLD = 0.45
-        SCRAPED_MIN_SCORE = 0.50
-
+        # The reranker already applied source-priority boosts to scores.
+        # Now we select the final chunks to send to the LLM using a
+        # precedence-aware strategy:
+        #
+        #   1. If the highest-priority source with results (faculty_text > scraped > faq)
+        #      has a score within `precedence_margin` of the overall best score,
+        #      prefer that source's chunks.
+        #   2. Otherwise, use the globally top-scoring chunks regardless of source.
+        #   3. Always include some diversity: supplement with chunks from other sources.
+        #
+        # Thresholds (from source_config):
+        #   >= confident_threshold (0.60) → confident answer
+        #   >= partial_threshold (0.45)   → partial answer (extra caution)
+        #   < partial_threshold           → abstain
+        cfg = SOURCE_CONFIG
         top_score = reranked[0].get("rerank_score", 0) if reranked else 0
 
-        if top_score >= PARTIAL_THRESHOLD:
-            scraped_tables = ("library_pages", "document_chunks")
-            scraped_chunks = [
-                c for c in reranked
-                if c.get("source_table") in scraped_tables
-                   and c.get("rerank_score", 0) >= SCRAPED_MIN_SCORE
-            ]
+        if top_score >= cfg.partial_threshold:
+            top_chunks, chosen_source, selection_reason = self._select_chunks_by_source_priority(
+                reranked, best_by_source
+            )
+            debug["chosen_source"] = chosen_source
+            debug["source_selection_reason"] = selection_reason
 
-            if scraped_chunks:
-                top_chunks = scraped_chunks[:5]
-                debug["chosen_source"] = "library pages (scraped)"
-            else:
-                top_chunks = reranked[:5]
-                primary_source = top_chunks[0].get("source_table", "unknown")
-                if primary_source == "faq":
-                    debug["chosen_source"] = "FAQ"
-                elif primary_source in scraped_tables:
-                    debug["chosen_source"] = "library pages (scraped)"
-                elif primary_source == "databases":
-                    debug["chosen_source"] = "database (semantic)"
-                else:
-                    debug["chosen_source"] = f"hybrid ({primary_source})"
+            # When faculty_text (custom notes) wins, the admin wrote this as
+            # the intended answer.  Use a lighter generation pipeline that
+            # treats the notes as authoritative — no evidence planning or
+            # claim audit that would reject "refer to this link" style answers.
+            if chosen_source == "faculty_text (admin)":
+                gen_result = self._format_faculty_text_answer(
+                    query, top_chunks, lang, history=history,
+                )
+                debug["context_sent_to_llm"] = gen_result["context_sent"]
+                debug["draft_answer"] = gen_result["answer"]
+                debug["removed_claims"] = []
+                debug["verified"] = True
+                debug["context_confidence"] = "confident (admin source)"
 
-            # Partial-answer mode: when best score is between 0.4 and 0.55,
-            # the context is related but probably doesn't fully answer.
-            # Signal the LLM to be extra cautious and explicit about gaps.
-            is_partial = top_score < CONFIDENT_THRESHOLD
+                result = (gen_result["answer"], debug)
+                _cache_result(result)
+                return result
+
+            # Standard grounded pipeline for scraped/FAQ sources
+            is_partial = top_score < cfg.confident_threshold
 
             gen_result = self._format_grounded_answer(
                 query, top_chunks, lang,
@@ -709,15 +756,188 @@ class LibraryChatbot:
             debug["context_confidence"] = "partial" if is_partial else "confident"
 
             result = (gen_result["answer"], debug)
-            self._cache.put(cache_key, result)
+            _cache_result(result)
             return result
 
         # --- Fallback: context too weak, abstain rather than hallucinate ---
         debug["chosen_source"] = "none (below threshold)"
         debug["top_rerank_score"] = top_score
         result = (self._format_unclear(lang), debug)
-        self._cache.put(cache_key, result)
+        _cache_result(result)
         return result
+
+    @staticmethod
+    def _select_chunks_by_source_priority(
+        reranked: List[dict],
+        best_by_source: dict,
+        max_chunks: int = 5,
+    ) -> tuple:
+        """Select final chunks using source-priority-aware logic.
+
+        Strategy:
+          - Walk the source priority order: faculty_text > scraped_website > faculty_faq
+          - The highest-priority source that has candidates "close enough" to the
+            overall best score wins as the primary source.
+          - "Close enough" = within precedence_margin of the global best.
+          - Primary source fills most slots; remaining slots get supplementary
+            chunks from other sources for diversity.
+
+        Returns:
+            (top_chunks, chosen_source_label, selection_reason)
+        """
+        cfg = SOURCE_CONFIG
+
+        # Priority order (databases excluded — handled separately by intent routing)
+        priority_order = [FACULTY_TEXT, SCRAPED_WEBSITE, FACULTY_FAQ]
+
+        global_best = reranked[0].get("rerank_score", 0) if reranked else 0
+        margin = cfg.precedence_margin
+
+        # Find the winning source: highest-priority source within margin of best
+        winning_source = None
+        winning_score = 0.0
+        for source_type in priority_order:
+            info = best_by_source.get(source_type)
+            if not info:
+                continue
+            source_score = info["score"]
+            if source_score >= (global_best - margin) and source_score >= cfg.partial_threshold:
+                winning_source = source_type
+                winning_score = source_score
+                break  # Take the first (highest-priority) match
+
+        # If no priority source qualifies, fall back to global ranking
+        if winning_source is None:
+            top_chunks = reranked[:max_chunks]
+            primary = top_chunks[0].get("source_type", "unknown") if top_chunks else "unknown"
+            source_labels = {
+                FACULTY_TEXT: "faculty_text (admin)",
+                SCRAPED_WEBSITE: "library pages (scraped)",
+                FACULTY_FAQ: "FAQ",
+                DATABASES: "database (semantic)",
+            }
+            label = source_labels.get(primary, f"hybrid ({primary})")
+            reason = (
+                f"No priority source within margin ({margin}) of global best ({global_best:.3f}). "
+                f"Using global ranking, top source: {primary}"
+            )
+            return top_chunks, label, reason
+
+        # Collect chunks from the winning source
+        primary_chunks = [
+            c for c in reranked
+            if c.get("source_type") == winning_source
+        ]
+
+        # Faculty text (custom notes) = admin's intended answer.
+        # Use ONLY faculty_text chunks — no supplementary from other sources.
+        # Other sources: allow supplementary diversity.
+        if winning_source == FACULTY_TEXT:
+            top_chunks = primary_chunks[:max_chunks]
+        else:
+            # Fill primary slots, leave 1 slot for supplementary diversity
+            primary_count = min(len(primary_chunks), max_chunks - 1)
+            if primary_count < 1:
+                primary_count = min(len(primary_chunks), max_chunks)
+
+            top_chunks = primary_chunks[:primary_count]
+            used_ids = {c["id"] for c in top_chunks}
+
+            remaining = max_chunks - len(top_chunks)
+            for c in reranked:
+                if remaining <= 0:
+                    break
+                if c["id"] not in used_ids:
+                    top_chunks.append(c)
+                    used_ids.add(c["id"])
+                    remaining -= 1
+
+        source_labels = {
+            FACULTY_TEXT: "faculty_text (admin)",
+            SCRAPED_WEBSITE: "library pages (scraped)",
+            FACULTY_FAQ: "FAQ",
+        }
+        chosen_label = source_labels.get(winning_source, winning_source)
+
+        reason = (
+            f"Source '{winning_source}' won with score {winning_score:.3f} "
+            f"(global best: {global_best:.3f}, margin: {margin}). "
+            f"Using {len(top_chunks)} chunks from {winning_source}."
+        )
+
+        logger.info(f"Source selection: {reason}")
+        return top_chunks, chosen_label, reason
+
+    def _format_faculty_text_answer(
+        self,
+        query: str,
+        chunks: List[dict],
+        lang: str,
+        history: Optional[List[dict]] = None,
+    ) -> dict:
+        """Generate an answer using faculty-authored custom notes as the
+        authoritative source.
+
+        Unlike _format_grounded_answer, this does NOT run evidence planning
+        or claim audit — the admin's content IS the intended answer.  The LLM
+        simply adapts the note content to the user's question and language.
+        """
+        # Build context from custom note chunks
+        context_parts = []
+        for chunk in chunks:
+            text = _get_chunk_text(chunk)
+            meta = chunk.get("metadata", {})
+            label = meta.get("label", "")
+            context_parts.append(text)
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        history_msgs = self._build_history_messages(history)
+
+        system_prompt = (
+            "You are a helpful assistant for the American University of Beirut (AUB) Libraries.\n\n"
+            "A library administrator has provided the following verified information. "
+            "Use it as the authoritative answer to the user's question.\n\n"
+            "Rules:\n"
+            "- Present the information from the admin notes clearly and helpfully.\n"
+            "- If the notes say to refer to a link, include that link in your answer.\n"
+            "- If the notes contain specific facts (hours, policies, etc.), present them.\n"
+            "- Do NOT add information that is not in the notes.\n"
+            "- Do NOT say you couldn't find the information — the notes ARE the answer.\n"
+            "- Keep your response concise and direct.\n"
+            "- Use markdown formatting for readability.\n"
+        )
+        if lang == Config.LANG_AR:
+            system_prompt += "- Respond in Arabic.\n"
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history_msgs)
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Admin-provided information:\n{context}\n\n"
+                f"User question: {query}"
+            ),
+        })
+
+        try:
+            resp = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.0,
+                top_p=0.9,
+                max_tokens=600,
+            )
+            answer = resp.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Faculty text answer generation failed: {e}")
+            # Fallback: return the note content directly
+            answer = context
+
+        return {
+            "answer": answer,
+            "context_sent": context,
+        }
 
     def _format_grounded_answer(
         self,
@@ -759,12 +979,14 @@ class LibraryChatbot:
             score = chunk.get("rerank_score", chunk.get("rrf_score", 0))
             confidence = "HIGH" if score >= 0.7 else "MEDIUM" if score >= 0.5 else "LOW"
 
+            source_type = chunk.get("source_type", get_source_type(chunk.get("source_table", "")))
+
             header = f"[Source: {page_title}"
             if section:
                 header += f" > {section}"
             if page_type and page_type not in ("general", ""):
                 header += f" (type: {page_type})"
-            header += f" | relevance: {confidence}]"
+            header += f" | source: {source_type} | relevance: {confidence}]"
 
             truncated_text = text[:3000]
             context_parts.append(f"{header}\n{truncated_text}")

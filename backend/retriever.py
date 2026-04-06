@@ -3,9 +3,13 @@ retriever.py
 Hybrid retrieval: combines vector (semantic) search with keyword (BM25-like) search.
 Retrieves candidates from all sources, merges and deduplicates results.
 
-v3 improvements:
-  - Intent-based table pre-filtering (skip irrelevant tables)
-  - page_type filtering for document_chunks
+v4 improvements (source-aware retrieval):
+  - Source priority boost in RRF scoring (gentle advantage for higher-trust sources)
+  - Per-source candidate limits (configurable via source_config)
+  - Minimum source diversity guarantee (prevents one source from dominating pool)
+  - Source type metadata attached to every result
+  - Intent-based table pre-filtering (carried forward from v3)
+  - page_type filtering for document_chunks (carried forward from v3)
   - phraseto_tsquery + plainto_tsquery combined keyword search
   - Basic synonym expansion for common library terms
 """
@@ -19,6 +23,11 @@ import numpy as np
 
 from .database import get_connection
 from .embeddings import embed_text
+from .source_config import (
+    SOURCE_CONFIG, TABLE_TO_SOURCE_TYPE,
+    get_source_type, get_source_trust_for_table, is_freshness_sensitive,
+    FACULTY_TEXT, SCRAPED_WEBSITE, FACULTY_FAQ,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +147,7 @@ def _classify_query_intent(query: str) -> dict:
             "intent": "faq",
         }
 
-    # Default: search everything
+    # Default: search everything (including custom_notes)
     return {
         "tables": None,
         "page_types": None,
@@ -317,7 +326,7 @@ def _vector_search(
 
 
 # ---------------------------------------------------------------------------
-# Hybrid merge with Reciprocal Rank Fusion (RRF)
+# Hybrid merge with Reciprocal Rank Fusion (RRF) + source priority boost
 # ---------------------------------------------------------------------------
 
 def _reciprocal_rank_fusion(
@@ -375,7 +384,62 @@ _TABLE_CONFIGS = {
         "text_column": "chunk_text",
         "source_label": "chunk",
     },
+    "custom_notes": {
+        "metadata_cols": ["label", "content"],
+        "text_column": "document",
+        "source_label": "custom_note",
+    },
 }
+
+
+# ---------------------------------------------------------------------------
+# Source diversity: ensure minimum representation from each source
+# ---------------------------------------------------------------------------
+
+def _ensure_source_diversity(
+    all_results: List[dict],
+    n_final: int,
+    min_per_source: int,
+) -> List[dict]:
+    """Ensure minimum candidates from each source type in the final pool.
+
+    Strategy:
+      1. Group results by source_type
+      2. Reserve min_per_source slots for each source (if available)
+      3. Fill remaining slots from the global ranked list
+    This prevents a single source (e.g. FAQ) from crowding out all others.
+    """
+    if min_per_source <= 0:
+        return all_results[:n_final]
+
+    # Group by source type
+    by_source: dict = defaultdict(list)
+    for r in all_results:
+        by_source[r["source_type"]].append(r)
+
+    reserved = []
+    reserved_ids = set()
+
+    # Reserve top candidates from each source type
+    for source_type, candidates in by_source.items():
+        for cand in candidates[:min_per_source]:
+            if cand["id"] not in reserved_ids:
+                reserved.append(cand)
+                reserved_ids.add(cand["id"])
+
+    # Fill remaining from global ranking (skip already-reserved)
+    remaining_slots = n_final - len(reserved)
+    for r in all_results:
+        if remaining_slots <= 0:
+            break
+        if r["id"] not in reserved_ids:
+            reserved.append(r)
+            reserved_ids.add(r["id"])
+            remaining_slots -= 1
+
+    # Sort final pool by boosted RRF score
+    reserved.sort(key=lambda x: x["rrf_score"], reverse=True)
+    return reserved
 
 
 # ---------------------------------------------------------------------------
@@ -390,23 +454,23 @@ def hybrid_retrieve(
     n_final: int = 30,
     page_type_filter: Optional[List[str]] = None,
 ) -> List[dict]:
-    """Perform hybrid retrieval across specified tables.
+    """Perform source-aware hybrid retrieval across specified tables.
 
-    Args:
-        query: User search query (should be the rewritten English version).
-        tables: Tables to search. Defaults to all available.
-        n_vector: Number of results from vector search per table.
-        n_keyword: Number of results from keyword search per table.
-        n_final: Max total results to return after merging.
-        page_type_filter: Optional list of page_type values to filter
-                          document_chunks (e.g. ["hours_contact", "faq"]).
+    Each result includes:
+      - id, rrf_score, vector_score, keyword_score
+      - metadata (table-specific fields)
+      - source_table (DB table name)
+      - source_label (human-readable)
+      - source_type (logical source: faculty_text, scraped_website, faculty_faq, databases)
+      - source_trust (trust score from config)
 
-    Returns:
-        List of dicts with: id, rrf_score, vector_score, keyword_score,
-        metadata, source_table.
+    Source priority is applied as a gentle boost to RRF scores, so higher-trust
+    sources get a small advantage without overriding strong relevance signals.
     """
+    cfg = SOURCE_CONFIG
+
     if tables is None:
-        tables = ["faq", "databases", "library_pages", "document_chunks"]
+        tables = ["faq", "databases", "library_pages", "document_chunks", "custom_notes"]
 
     # Verify which tables actually exist and have data
     valid_tables = []
@@ -417,19 +481,28 @@ def hybrid_retrieve(
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(f"SELECT COUNT(*) FROM {table}")
-                    if cur.fetchone()[0] > 0:
+                    count = cur.fetchone()[0]
+                    if count > 0:
                         valid_tables.append(table)
-        except Exception:
+                    else:
+                        logger.info(f"Skipping table '{table}': 0 rows")
+        except Exception as e:
+            logger.warning(f"Skipping table '{table}': {e}")
             continue
+
+    # Check if query is time-sensitive (for freshness boost on scraped content)
+    freshness_sensitive = is_freshness_sensitive(query)
 
     all_results = []
 
     for table in valid_tables:
         config = _TABLE_CONFIGS[table]
+        source_type = get_source_type(table)
+        source_trust = get_source_trust_for_table(table)
 
-        # Give document_chunks more candidates
-        table_n_vector = n_vector + 5 if table == "document_chunks" else n_vector
-        table_n_keyword = n_keyword + 5 if table == "document_chunks" else n_keyword
+        # Per-source candidate limits from config
+        table_n_vector = cfg.per_source_n_vector.get(source_type, n_vector)
+        table_n_keyword = cfg.per_source_n_keyword.get(source_type, n_keyword)
 
         # page_type filter only applies to document_chunks
         pt_filter = page_type_filter if table == "document_chunks" else None
@@ -445,20 +518,46 @@ def hybrid_retrieve(
 
         merged = _reciprocal_rank_fusion(vector_results, keyword_results)
 
+        # Apply source priority boost to RRF scores.
+        # This is a small additive boost proportional to source trust,
+        # giving higher-priority sources a gentle advantage.
+        source_boost = cfg.rrf_source_boost_weight * source_trust
+
+        # Extra boost for scraped content on time-sensitive queries
+        if freshness_sensitive and source_type == SCRAPED_WEBSITE:
+            source_boost += cfg.freshness_boost * cfg.rrf_source_boost_weight
+
         for result in merged:
             result["source_table"] = table
             result["source_label"] = config["source_label"]
+            result["source_type"] = source_type
+            result["source_trust"] = source_trust
+            result["rrf_score"] += source_boost
+
         all_results.extend(merged)
 
-    # Sort by RRF score across all tables and take top n_final
+    # Sort by boosted RRF score across all tables
     all_results.sort(key=lambda x: x["rrf_score"], reverse=True)
 
+    # Ensure source diversity: don't let one source crowd out the pool
+    final_results = _ensure_source_diversity(
+        all_results,
+        n_final=cfg.n_final_candidates,
+        min_per_source=cfg.min_candidates_per_source,
+    )
+
+    # Log source distribution for debugging
+    source_counts = defaultdict(int)
+    for r in final_results:
+        source_counts[r["source_type"]] += 1
     logger.info(
         f"Hybrid retrieval: {len(all_results)} total candidates from {valid_tables}, "
-        f"returning top {min(n_final, len(all_results))}"
-        + (f" (page_type_filter={page_type_filter})" if page_type_filter else "")
+        f"returning {len(final_results)} | source distribution: {dict(source_counts)}"
+        + (f" | page_type_filter={page_type_filter}" if page_type_filter else "")
+        + (" | freshness_boost=ON" if freshness_sensitive else "")
     )
-    return all_results[:n_final]
+
+    return final_results
 
 
 def classify_query_intent(query: str) -> dict:

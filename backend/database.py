@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS library_pages (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Custom notes: free-form text entries added by admins
+CREATE TABLE IF NOT EXISTS custom_notes (
+    id TEXT PRIMARY KEY,
+    document TEXT NOT NULL,
+    embedding vector(1536) NOT NULL,
+    label TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Semantic chunks from processed documents (for upgraded RAG pipeline)
 CREATE TABLE IF NOT EXISTS document_chunks (
     id TEXT PRIMARY KEY,
@@ -65,6 +75,8 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 CREATE INDEX IF NOT EXISTS idx_faq_embedding ON faq USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_databases_embedding ON databases USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_library_pages_embedding ON library_pages USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_custom_notes_embedding ON custom_notes USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_custom_notes_fts ON custom_notes USING gin (to_tsvector('english', document));
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_chunks_fts ON document_chunks USING gin (to_tsvector('english', chunk_text));
 CREATE INDEX IF NOT EXISTS idx_chunks_page_type ON document_chunks (page_type);

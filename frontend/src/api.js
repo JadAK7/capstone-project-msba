@@ -134,6 +134,47 @@ export async function deleteDatabase(id) {
 }
 
 // ---------------------------------------------------------------------------
+// Admin API -- Custom Notes CRUD
+// ---------------------------------------------------------------------------
+
+export async function addCustomNote(label, content) {
+  const res = await fetch(`${API_BASE}/api/admin/custom-note`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, content }),
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to add custom note: ${res.status} - ${errorText}`);
+  }
+  return res.json();
+}
+
+export async function updateCustomNote(id, label, content) {
+  const res = await fetch(`${API_BASE}/api/admin/custom-note/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, content }),
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to update custom note: ${res.status} - ${errorText}`);
+  }
+  return res.json();
+}
+
+export async function deleteCustomNote(id) {
+  const res = await fetch(`${API_BASE}/api/admin/custom-note/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to delete custom note: ${res.status} - ${errorText}`);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Admin API -- Library Pages
 // ---------------------------------------------------------------------------
 
@@ -206,6 +247,17 @@ export async function triggerReindex() {
 export async function getSystemInfo() {
   const res = await fetch(`${API_BASE}/api/admin/system-info`);
   if (!res.ok) throw new Error(`Failed to fetch system info: ${res.status}`);
+  return res.json();
+}
+
+export async function clearCache() {
+  const res = await fetch(`${API_BASE}/api/admin/clear-cache`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to clear cache: ${res.status} - ${errorText}`);
+  }
   return res.json();
 }
 
@@ -294,6 +346,17 @@ export async function deleteFeedback(feedbackId) {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error(`Failed to delete feedback: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteAllFeedback() {
+  const res = await fetch(`${API_BASE}/api/admin/feedback/all`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Failed to delete all feedback: ${res.status} - ${errorText}`);
+  }
   return res.json();
 }
 
