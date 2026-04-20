@@ -1,0 +1,427 @@
+{
+  "metadata": {
+    "timestamp": "2026-04-16T13:21:44.806305Z",
+    "answerable_count": 20,
+    "out_of_domain_count": 15,
+    "in_scope_unanswerable_count": 10
+  },
+  "aggregate": {
+    "false_abstention_rate": 0.3,
+    "ood_correct_handling_rate": 1.0,
+    "unanswerable_abstention_rate": 1.0,
+    "answerable_false_abstentions": 6,
+    "ood_correctly_handled": 15,
+    "unanswerable_abstained": 10
+  },
+  "answerable_results": [
+    {
+      "query": "What are the library opening hours?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "The library opening hours can be found at the following link: [Library Opening Hours](https://www.aub.edu.lb/Libraries/P",
+      "latency_ms": 14653.1
+    },
+    {
+      "query": "How do I borrow a book from the library?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "To borrow a book from the library, you need to locate it in the Library Catalog, get the Call Number, and hand it to the",
+      "latency_ms": 8191.9
+    },
+    {
+      "query": "What are the fines for overdue books?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "Overdue fines for any library item, including books, are $1 per day. \n\nFor any unpaid fine, you will receive up to three",
+      "latency_ms": 5632.1
+    },
+    {
+      "query": "Can I reserve a study room at AUB?",
+      "expected": "answer",
+      "abstained": true,
+      "guard_blocked": false,
+      "false_abstention": true,
+      "answer_preview": "I could not find specific information to answer this question in the available sources. Please contact the library direc",
+      "latency_ms": 6834.4
+    },
+    {
+      "query": "How do I renew a borrowed book?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "You can renew a borrowed book either online or in person at the Circulation Desk in all libraries. \n\nFor online renewal,",
+      "latency_ms": 6272.9
+    },
+    {
+      "query": "Can I access library databases from off-campus?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "Yes, you can access library databases from off-campus. Most e-resources may be accessed off-campus, and you will be prom",
+      "latency_ms": 6763.2
+    },
+    {
+      "query": "What printing services are available at the library?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "The library offers several printing services:\n\n1. **Network Printers**: Available in all libraries for users with an act",
+      "latency_ms": 8697.9
+    },
+    {
+      "query": "How do I request an interlibrary loan?",
+      "expected": "answer",
+      "abstained": true,
+      "guard_blocked": false,
+      "false_abstention": true,
+      "answer_preview": "I could not find this information in the available sources. Please contact the library directly or visit the AUB Librari",
+      "latency_ms": 7681.0
+    },
+    {
+      "query": "Can AUB alumni use the library?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "Yes, AUB alumni can use the library resources inside the library. To borrow library resources, AUB alumni need to obtain",
+      "latency_ms": 6757.7
+    },
+    {
+      "query": "How many books can I borrow at once?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "The number of books you can borrow at once depends on your borrower category:\n\n- **Full Time**: 100 Books\n- **Part-time*",
+      "latency_ms": 5711.9
+    },
+    {
+      "query": "Which databases are available for medical research?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "The databases available for medical research include:\n\n1. **EMBASE**: A biomedical and pharmaceutical database indexing ",
+      "latency_ms": 11492.7
+    },
+    {
+      "query": "What is PubMed and how do I access it?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "**Recommended Databases**\n\n**PubMed** (confidence: 0.92)\nBibliographic database that provides access to over 16 million ",
+      "latency_ms": 3176.1
+    },
+    {
+      "query": "Where is Jafet library located?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "Jafet Library is located behind College Hall, which is the first building after entering the campus from the Main Gate. ",
+      "latency_ms": 8905.6
+    },
+    {
+      "query": "What is the borrowing period for AUB students?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "AUB undergraduate students have a borrowing period of 4 weeks for books, and 3 days for audiovisual items, periodical is",
+      "latency_ms": 7118.3
+    },
+    {
+      "query": "Does AUB library have IEEE Xplore?",
+      "expected": "answer",
+      "abstained": true,
+      "guard_blocked": false,
+      "false_abstention": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 4760.3
+    },
+    {
+      "query": "How do I connect to library WiFi?",
+      "expected": "answer",
+      "abstained": true,
+      "guard_blocked": false,
+      "false_abstention": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 3278.6
+    },
+    {
+      "query": "What is the interlibrary loan service?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "The interlibrary loan service allows for the borrowing of resources that are available in print at the University Librar",
+      "latency_ms": 19739.2
+    },
+    {
+      "query": "Can I submit my thesis to the library?",
+      "expected": "answer",
+      "abstained": true,
+      "guard_blocked": false,
+      "false_abstention": true,
+      "answer_preview": "You can email **lib-thesis@aub.edu.lb** for thesis formatting and submission (Source: Where do I get help with my thesis",
+      "latency_ms": 11899.5
+    },
+    {
+      "query": "How do I access Scopus from home?",
+      "expected": "answer",
+      "abstained": true,
+      "guard_blocked": false,
+      "false_abstention": true,
+      "answer_preview": "I could not find this information in the available sources. Please contact the library directly or visit the AUB Librari",
+      "latency_ms": 6346.9
+    },
+    {
+      "query": "What are the quiet study areas in the library?",
+      "expected": "answer",
+      "abstained": false,
+      "guard_blocked": false,
+      "false_abstention": false,
+      "answer_preview": "The library offers a number of total silence, quiet study, and group study areas, in addition to computer labs. (Source:",
+      "latency_ms": 7885.0
+    }
+  ],
+  "out_of_domain_results": [
+    {
+      "query": "What is the capital of France?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "I can only assist with library-related questions, such as library services, hours, databases, borrowing policies, and re",
+      "latency_ms": 1736.5
+    },
+    {
+      "query": "Who wrote Harry Potter?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 5956.9
+    },
+    {
+      "query": "How do I make pasta carbonara?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 6543.1
+    },
+    {
+      "query": "What is the current exchange rate for USD to LBP?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 4916.9
+    },
+    {
+      "query": "Can you write a cover letter for me?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 3488.8
+    },
+    {
+      "query": "What is the best programming language to learn in 2025?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 4188.5
+    },
+    {
+      "query": "How do I invest in the stock market?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "I can only assist with library-related questions, such as library services, hours, databases, borrowing policies, and re",
+      "latency_ms": 406.7
+    },
+    {
+      "query": "What are the symptoms of COVID-19?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 5265.9
+    },
+    {
+      "query": "Who won the last FIFA World Cup?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 5124.8
+    },
+    {
+      "query": "How do I get a Lebanese driving license?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 3918.5
+    },
+    {
+      "query": "What is the best way to lose weight?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 5556.0
+    },
+    {
+      "query": "Can you summarize the history of Ancient Rome?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "I could not find specific information to answer this question in the available sources. Please contact the library direc",
+      "latency_ms": 8262.3
+    },
+    {
+      "query": "How do I fix a bug in my Python code?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 5733.2
+    },
+    {
+      "query": "What is the population of Beirut?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 5568.4
+    },
+    {
+      "query": "Can you translate this sentence to French?",
+      "expected": "abstain_or_block",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_handled": true,
+      "answer_preview": "I can only assist with library-related questions, such as library services, hours, databases, borrowing policies, and re",
+      "latency_ms": 405.7
+    }
+  ],
+  "unanswerable_results": [
+    {
+      "query": "What is the name of the head librarian at Jafet?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 3891.5
+    },
+    {
+      "query": "How many total books does the AUB library collection have?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 4308.3
+    },
+    {
+      "query": "What was the last book donated to the AUB library?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "I could not find this information in the available sources. Please contact the library directly or visit the AUB Librari",
+      "latency_ms": 6339.1
+    },
+    {
+      "query": "What is the exact fine for losing a rare book?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "I could not find specific information to answer this question in the available sources. Please contact the library direc",
+      "latency_ms": 9421.4
+    },
+    {
+      "query": "Does AUB library subscribe to Nature journal?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 7273.2
+    },
+    {
+      "query": "What floor is the Arabic collection on in Jafet?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "I could not find this information in the available sources. Please contact the library directly or visit the AUB Librari",
+      "latency_ms": 6857.7
+    },
+    {
+      "query": "How many study rooms does the Saab Medical library have?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 5529.6
+    },
+    {
+      "query": "What is the ISBN of the most borrowed book at AUB?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 4098.5
+    },
+    {
+      "query": "When was Jafet library last renovated?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 4912.9
+    },
+    {
+      "query": "What is the library director's email address?",
+      "expected": "abstain",
+      "abstained": true,
+      "guard_blocked": false,
+      "correctly_uncertain": true,
+      "answer_preview": "**I'm not quite sure how to help.** You can:\n\n- Ask about library services (hours, borrowing, access, etc.)\n- Request da",
+      "latency_ms": 4297.9
+    }
+  ]
+}

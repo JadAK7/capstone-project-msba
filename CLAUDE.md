@@ -46,6 +46,10 @@ cd frontend && npm run build
 # Scrape AUB library website (optional)
 python scripts/scrape_aub_library.py
 
+# Run content freshness check (compares stored vs live content)
+python scripts/freshness_check.py          # check + auto-rescrape if stale
+python scripts/freshness_check.py --dry-run  # check only, no rescrape
+
 # Run everything with Docker (single command)
 docker-compose up --build
 ```
@@ -57,14 +61,16 @@ No test suite exists yet.
 ### Data Flow (Pipeline v3: Query Rewriting + Cross-Encoder Reranking)
 ```
 React UI --> POST /api/chat { message, language? } --> FastAPI
-  --> 1. Input Guards (prompt injection detection, domain scope check)
+  --> 1. Input Guards (regex + embedding-based injection detection, domain scope check)
   --> 2. Query Rewriting (LLM-based via gpt-4o-mini)
         --> Follow-up resolution using conversation history
         --> Arabic → English translation for retrieval
         --> Short/vague query expansion
         --> Fast-path skip for well-formed English queries (>5 words)
-  --> Cache lookup (rewritten_query, lang)
+  --> Cache lookup (exact key match on rewritten_query, lang)
   --> HIT: return cached (answer, debug) immediately
+  --> Semantic cache lookup (cosine similarity >= 0.95 against cached embeddings)
+  --> HIT: return semantically matched cached response
   --> MISS:
     --> Admin feedback correction lookup (pgvector similarity >= 0.85)
     --> FOUND: use admin-corrected answer via LLM
@@ -72,7 +78,7 @@ React UI --> POST /api/chat { message, language? } --> FastAPI
       --> 3. Intent Classification → table/page_type pre-filtering
             --> hours → hours_contact pages, database → databases table, etc.
       --> 4. Hybrid Retrieval (per table: vector + keyword search)
-            --> Vector: embed_text(rewritten_query) -> pgvector cosine similarity
+            --> Vector: single embed_text(rewritten_query) reused across all tables
             --> Keyword: phraseto_tsquery (boosted 2x) + plainto_tsquery + synonym expansion
             --> Merge: Reciprocal Rank Fusion (65% vector, 35% keyword)
             --> page_type WHERE clause for document_chunks when intent is specific
@@ -122,8 +128,16 @@ Playwright Scraper --> Raw HTML pages (preserves innerHTML + innerText)
 - `POST /reindex` -- Trigger full re-index from CSV sources (also clears response cache)
 - `POST /rescrape` -- Trigger background rescrape of AUB library website
 - `GET /rescrape/status` -- Check rescrape progress (running, message, pages_scraped, error)
+- `POST /freshness-check` -- Run content freshness check against live website (optional `dry_run` param)
+- `GET /freshness-status` -- Last freshness check result and scheduler status
 - `GET /system-info` -- System information
 - `GET /cache-stats` -- Response cache statistics (hits, misses, size, hit rate)
+
+**Escalations:**
+- `POST /api/escalate` -- Student submits question for librarian (public). Accepts `{ student_email, student_name?, question }`
+- `GET /api/admin/escalations` -- List escalations (filterable by status: pending/answered/closed)
+- `POST /api/admin/escalations/{id}/respond` -- Admin saves response. Accepts `{ response }`
+- `DELETE /api/admin/escalations/{id}` -- Delete an escalation
 - `GET /analytics/summary`, `/analytics/trends`, `/analytics/top-queries` -- Analytics
 - `GET /analytics/unanswered-queries` -- Questions the bot could not answer
 - `GET /analytics/charts` -- All matplotlib charts as base64 PNGs + extended summary stats
@@ -134,7 +148,7 @@ Playwright Scraper --> Raw HTML pages (preserves innerHTML + innerText)
   - `chatbot.py` -- `LibraryChatbot`, `IntentDetector`, `LanguageDetector`, `EmbeddingUtils`, `Config`
   - `database.py` -- PostgreSQL connection pool (`ThreadedConnectionPool`), schema initialization
   - `embeddings.py` -- Centralized OpenAI embedding generation (`embed_text`, `embed_texts`)
-  - `cache.py` -- `ResponseCache` in-memory TTL+LRU cache for chatbot responses
+  - `cache.py` -- `ResponseCache` in-memory TTL+LRU cache with semantic similarity matching
   - `index_builder.py` -- `IndexBuilder` for building PostgreSQL tables from CSV data + chunk pipeline
   - `admin.py` -- `AdminManager` for CRUD operations on PostgreSQL tables
   - `scraper_cleaner.py` -- HTML cleaning, noise removal, structured document extraction
@@ -143,14 +157,15 @@ Playwright Scraper --> Raw HTML pages (preserves innerHTML + innerText)
   - `retriever.py` -- Hybrid retrieval: vector + keyword (phrase+plain tsquery, synonym expansion) + RRF + intent pre-filtering
   - `reranker.py` -- LLM-based reranking (gpt-4o-mini relevance scoring, min_score=0.5)
   - `query_rewriter.py` -- LLM-based query rewriting (follow-up resolution, Arabic→English, expansion)
-  - `input_guard.py` -- Pre-processing safety: prompt injection detection + domain scope filtering
+  - `input_guard.py` -- Pre-processing safety: regex + embedding-based injection detection + domain scope filtering
   - `verifier.py` -- Post-generation claim verification + safety validation
   - `analytics.py` -- `ChatLogger`, `AnalyticsComputer` for usage tracking
   - `chart_generator.py` -- `ChartGenerator` for matplotlib chart generation (22 charts, base64 PNG)
 - **`frontend/`** -- React application
   - `src/App.js` -- Main shell, state management, API calls
   - `src/components/` -- Header, Footer, ChatWindow, ChatInput, MessageBubble, DebugPanel
-  - `src/pages/AdminDashboard.js` -- Admin dashboard (System Status, Data Management, Analytics tabs)
+  - `src/pages/AdminDashboard.js` -- Admin dashboard (System Status, Data Management, Analytics, Conversations, Escalations tabs)
+  - `src/components/EscalationModal.js` -- Student escalation form (modal in chat interface)
   - `src/api.js` -- Fetch wrapper for backend API
   - `src/App.css` -- AUB-branded styles (includes RTL support for Arabic)
   - `src/i18n/` -- Translation files (en.js, ar.js)
@@ -162,11 +177,12 @@ Playwright Scraper --> Raw HTML pages (preserves innerHTML + innerText)
   - `build_index.py` -- Standalone index builder (same logic as IndexBuilder)
   - `chat.py` -- CLI chatbot (standalone, bilingual, no web server)
   - `scrape_aub_library.py` -- Playwright scraper, stores in PostgreSQL
+  - `freshness_check.py` -- Automated content staleness detection, triggers rescrape if >20% drift
 - **`docker-compose.yml`** -- PostgreSQL 16 + pgvector + app container
 
 ### Key Classes (backend/)
 - **`LibraryChatbot`** -- Main orchestrator: queries pgvector tables, routes through intent detection, bilingual. Uses ResponseCache.
-- **`ResponseCache`** -- In-memory TTL+LRU cache keyed on (search_query, language). 256 entries max, 1hr TTL. Cleared on reindex.
+- **`ResponseCache`** -- In-memory TTL+LRU cache with semantic similarity matching. Keyed on (search_query, language), with query embeddings stored for cosine similarity lookup (threshold 0.95). 256 entries max, 1hr TTL. Cleared on reindex.
 - **`IntentDetector`** -- Keyword regex-based intent classification (English + Arabic patterns)
 - **`LanguageDetector`** -- Unicode character analysis for Arabic vs English detection
 - **`EmbeddingUtils`** -- HTML cleaning and library content boilerplate stripping
@@ -185,6 +201,7 @@ Playwright Scraper --> Raw HTML pages (preserves innerHTML + innerText)
 | `document_chunks` | chunk_text (semantic chunks) | `page_url`, `page_title`, `section_title`, `page_type`, `chunk_index` |
 | `chat_conversations` | query + answer logs | `query`, `answer`, `language`, `chosen_source`, scores, `retrieved_chunks` (JSONB) |
 | `chat_feedback` | admin feedback | `conversation_id`, `rating`, `corrected_answer`, `comment`, `embedding` |
+| `escalations` | librarian escalation requests | `student_email`, `student_name`, `question`, `status`, `admin_response` |
 
 All embedding tables have HNSW indexes on `embedding vector(1536)` using `vector_cosine_ops`.
 

@@ -23,9 +23,30 @@ import logging
 from .cache import ResponseCache
 from .database import get_connection
 from .embeddings import embed_text
+from .llm_client import chat_completion, LLMUnavailableError, is_circuit_open
+from .database import DatabaseUnavailableError
 from .retriever import hybrid_retrieve, classify_query_intent
 from .reranker import rerank, _get_chunk_text
 from .input_guard import run_input_guards, get_refusal_message
+
+
+# Regex-based output sanitizer for XSS defense-in-depth.
+# Strips dangerous HTML tags and event attributes from generated text.
+_DANGEROUS_TAGS_RE = re.compile(
+    r"<\s*/?\s*(script|iframe|object|embed|form|style|link|meta|base)\b[^>]*>",
+    re.IGNORECASE,
+)
+_EVENT_ATTRS_RE = re.compile(
+    r"\s+on\w+\s*=\s*[\"'][^\"']*[\"']",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_output(text: str) -> str:
+    """Strip dangerous HTML tags and event attributes from output text."""
+    text = _DANGEROUS_TAGS_RE.sub("", text)
+    text = _EVENT_ATTRS_RE.sub("", text)
+    return text
 from .query_rewriter import rewrite_query
 from .source_config import (
     SOURCE_CONFIG, get_source_type, get_source_trust,
@@ -121,84 +142,8 @@ class EmbeddingUtils:
         return s
 
 
-class IntentDetector:
-    """Detects user intent from query. Supports English and Arabic keywords."""
 
-    # English database keywords
-    DB_KEYWORDS_EN = re.compile(
-        r"\b(database|db|which database|where to search|where can i find|"
-        r"source for|best database|recommend|ieee|scopus|pubmed|jstor|"
-        r"proquest|web of science|find.*articles?|search.*papers?|"
-        r"research.*source)\b",
-        re.IGNORECASE
-    )
-
-    # Arabic database keywords
-    DB_KEYWORDS_AR = re.compile(
-        r"("
-        r"\u0642\u0627\u0639\u062F\u0629\s*\u0628\u064A\u0627\u0646\u0627\u062A|"
-        r"\u0642\u0648\u0627\u0639\u062F\s*\u0628\u064A\u0627\u0646\u0627\u062A|"
-        r"\u0642\u0627\u0639\u062F\u0629\s*\u0645\u0639\u0644\u0648\u0645\u0627\u062A|"
-        r"\u0623\u064A\u0646\s*\u0623\u0628\u062D\u062B|"
-        r"\u0623\u064A\u0646\s*\u0623\u062C\u062F|"
-        r"\u0645\u0635\u062F\u0631|"
-        r"\u0645\u0635\u0627\u062F\u0631|"
-        r"\u0623\u0641\u0636\u0644\s*\u0642\u0627\u0639\u062F\u0629|"
-        r"\u0623\u0648\u0635\u064A|"
-        r"\u062A\u0648\u0635\u064A\u0629|"
-        r"\u0623\u0646\u0635\u062D|"
-        r"\u0627\u0628\u062D\u062B|"
-        r"\u0628\u062D\u062B|"
-        r"\u0645\u0642\u0627\u0644\u0627\u062A|"
-        r"\u0645\u0642\u0627\u0644\u0629|"
-        r"\u0623\u0648\u0631\u0627\u0642\s*\u0628\u062D\u062B\u064A\u0629|"
-        r"\u0648\u0631\u0642\u0629\s*\u0628\u062D\u062B\u064A\u0629|"
-        r"\u0645\u062C\u0644\u0627\u062A\s*\u0639\u0644\u0645\u064A\u0629|"
-        r"\u0645\u062C\u0644\u0629\s*\u0639\u0644\u0645\u064A\u0629|"
-        r"\u062F\u0648\u0631\u064A\u0627\u062A|"
-        r"\u0631\u0633\u0627\u0644\u0629|"
-        r"\u0631\u0633\u0627\u0626\u0644|"
-        r"\u0623\u0637\u0631\u0648\u062D\u0629|"
-        r"\u0645\u0624\u062A\u0645\u0631|"
-        r"\u0645\u0646\u0634\u0648\u0631\u0627\u062A"
-        r")",
-        re.IGNORECASE
-    )
-
-    # English research topic keywords
-    RESEARCH_TOPICS_EN = re.compile(
-        r"\b(articles?|papers?|journals?|conference|proceedings|"
-        r"publications?|research|standards?|thesis|dissertation)\b",
-        re.IGNORECASE
-    )
-
-    # Arabic research topic keywords
-    RESEARCH_TOPICS_AR = re.compile(
-        r"("
-        r"\u0645\u0642\u0627\u0644|"
-        r"\u0628\u062D\u062B|"
-        r"\u0623\u0628\u062D\u0627\u062B|"
-        r"\u062F\u0631\u0627\u0633\u0629|"
-        r"\u062F\u0631\u0627\u0633\u0627\u062A|"
-        r"\u0645\u0631\u0627\u062C\u0639|"
-        r"\u0645\u0631\u062C\u0639|"
-        r"\u0639\u0644\u0645\u064A|"
-        r"\u0623\u0643\u0627\u062F\u064A\u0645\u064A"
-        r")",
-        re.IGNORECASE
-    )
-
-    @classmethod
-    def is_database_intent(cls, query: str) -> bool:
-        """Check if query has database intent. Works for both Arabic and English."""
-        has_db_keywords_en = bool(cls.DB_KEYWORDS_EN.search(query))
-        has_research_en = bool(cls.RESEARCH_TOPICS_EN.search(query))
-        has_db_keywords_ar = bool(cls.DB_KEYWORDS_AR.search(query))
-        has_research_ar = bool(cls.RESEARCH_TOPICS_AR.search(query))
-        return (
-            has_db_keywords_en or has_research_en
-            or has_db_keywords_ar or has_research_ar
-        )
+# IntentDetector has been consolidated into intent_classifier.py
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +295,7 @@ class LibraryChatbot:
 
     def __init__(self, api_key: str):
         self.client = OpenAI(api_key=api_key)
-        self._cache = ResponseCache(max_size=256, ttl_seconds=3600)
+        self._cache = ResponseCache(max_size=1024, ttl_seconds=3600)
 
         # Verify tables exist and have data
         self.library_available = False
@@ -371,8 +316,8 @@ class LibraryChatbot:
                 return cur.fetchone()[0]
 
     def clear_cache(self) -> None:
-        """Invalidate all cached responses (e.g. after reindex)."""
-        self._cache.clear()
+        """Invalidate all cached responses and remove disk snapshot."""
+        self._cache.invalidate_all()
 
     def cache_stats(self) -> dict:
         """Return cache hit/miss statistics."""
@@ -471,6 +416,51 @@ class LibraryChatbot:
         """
         lang = self._resolve_language(query, language)
 
+        try:
+            answer, debug = self._answer_pipeline(query, lang, history)
+            return _sanitize_output(answer), debug
+        except LLMUnavailableError as e:
+            logger.error(f"LLM unavailable: {e}")
+            if lang == Config.LANG_AR:
+                msg = "أواجه طلباً مرتفعاً حالياً. يرجى المحاولة مرة أخرى بعد قليل."
+            else:
+                msg = "I'm experiencing high demand right now. Please try again shortly."
+            return msg, {
+                "query": query,
+                "detected_language": lang,
+                "chosen_source": "error (llm_unavailable)",
+                "cache_hit": False,
+                "pipeline": "error",
+                "degradation_type": "llm_unavailable",
+                "error": str(e),
+            }
+        except DatabaseUnavailableError as e:
+            logger.error(f"Database unavailable: {e}")
+            if lang == Config.LANG_AR:
+                msg = "لا أستطيع البحث في قاعدة بيانات المكتبة مؤقتاً. يرجى المحاولة مرة أخرى بعد لحظات."
+            else:
+                msg = (
+                    "I'm temporarily unable to search the library database. "
+                    "Please try again in a moment."
+                )
+            return msg, {
+                "query": query,
+                "detected_language": lang,
+                "chosen_source": "error (db_unavailable)",
+                "cache_hit": False,
+                "pipeline": "error",
+                "degradation_type": "database_unavailable",
+                "error": str(e),
+            }
+
+    def _answer_pipeline(
+        self,
+        query: str,
+        lang: str,
+        history: Optional[List[dict]] = None,
+    ) -> Tuple[str, dict]:
+        """Internal pipeline — separated so top-level answer() can catch LLM failures."""
+
         # --- 1. Input safety guards (runs BEFORE retrieval or LLM) ---
         guard_result = run_input_guards(query)
         if not guard_result.allowed:
@@ -530,14 +520,33 @@ class LibraryChatbot:
                 self._cache.put(original_cache_key, cached)
                 return answer, debug
 
-        # Helper to store result under both cache keys
+        # --- Embed query ONCE for reuse in semantic cache + retrieval ---
+        # This avoids redundant embedding calls across tables in hybrid_retrieve.
+        query_embedding = embed_text(rewritten_query)
+
+        # --- Semantic cache lookup ---
+        # Even if exact key missed, a semantically similar cached query may match.
+        # Cosine similarity >= 0.95 catches rephrasings the rewriter didn't normalize.
+        if not feedback:
+            cached = self._cache.semantic_get(query_embedding, lang)
+            if cached is not None:
+                answer, debug = cached
+                debug = dict(debug)
+                debug["cache_hit"] = True
+                debug["semantic_cache_hit"] = True
+                # Store under both keys so future exact matches are fast
+                self._cache.put(original_cache_key, cached, embedding=query_embedding)
+                self._cache.put(cache_key, cached, embedding=query_embedding)
+                return answer, debug
+
+        # Helper to store result under both cache keys (with embedding for semantic matching)
         def _cache_result(result):
-            self._cache.put(cache_key, result)
-            self._cache.put(original_cache_key, result)
+            self._cache.put(cache_key, result, embedding=query_embedding)
+            self._cache.put(original_cache_key, result, embedding=query_embedding)
 
         # --- 3. Intent classification → pre-filtering ---
         intent_info = classify_query_intent(rewritten_query)
-        is_db_intent = IntentDetector.is_database_intent(query) or intent_info["intent"] == "database"
+        is_db_intent = intent_info.get("is_database_intent", False) or intent_info["intent"] == "database"
 
         # Determine which tables to search based on intent
         if intent_info["tables"]:
@@ -564,6 +573,7 @@ class LibraryChatbot:
             n_keyword=15,
             n_final=30,
             page_type_filter=intent_info.get("page_types"),
+            query_embedding=query_embedding,
         )
 
         # If pre-filtered retrieval found too few results, retry without filter
@@ -576,6 +586,7 @@ class LibraryChatbot:
                 n_keyword=15,
                 n_final=30,
                 page_type_filter=None,
+                query_embedding=query_embedding,
             )
 
         # --- 5. Cross-encoder reranking (local, no API cost) ---
@@ -723,41 +734,71 @@ class LibraryChatbot:
             debug["chosen_source"] = chosen_source
             debug["source_selection_reason"] = selection_reason
 
-            # When faculty_text (custom notes) wins, the admin wrote this as
-            # the intended answer.  Use a lighter generation pipeline that
-            # treats the notes as authoritative — no evidence planning or
-            # claim audit that would reject "refer to this link" style answers.
-            if chosen_source == "faculty_text (admin)":
-                gen_result = self._format_faculty_text_answer(
-                    query, top_chunks, lang, history=history,
+            try:
+                # When faculty_text (custom notes) wins, the admin wrote this as
+                # the intended answer.  Use a lighter generation pipeline that
+                # treats the notes as authoritative — no evidence planning or
+                # claim audit that would reject "refer to this link" style answers.
+                if chosen_source == "faculty_text (admin)":
+                    gen_result = self._format_faculty_text_answer(
+                        query, top_chunks, lang, history=history,
+                    )
+                    debug["context_sent_to_llm"] = gen_result["context_sent"]
+                    debug["draft_answer"] = gen_result["answer"]
+                    debug["removed_claims"] = []
+                    debug["verified"] = True
+                    debug["context_confidence"] = "confident (admin source)"
+
+                    result = (gen_result["answer"], debug)
+                    _cache_result(result)
+                    return result
+
+                # --- FAST PATH: skip full grounding for very high-confidence matches ---
+                if top_score >= cfg.fast_path_threshold:
+                    logger.info(
+                        f"Fast path: top_score={top_score:.3f} >= {cfg.fast_path_threshold}, "
+                        f"skipping evidence planning pipeline"
+                    )
+                    gen_result = self._format_fast_path_answer(
+                        query, top_chunks, lang, history=history,
+                    )
+                    debug["context_sent_to_llm"] = gen_result["context_sent"]
+                    debug["draft_answer"] = gen_result["answer"]
+                    debug["removed_claims"] = []
+                    debug["verified"] = True
+                    debug["context_confidence"] = "high (fast path)"
+                    debug["pipeline"] = "fast_path"
+
+                    result = (gen_result["answer"], debug)
+                    _cache_result(result)
+                    return result
+
+                # Standard grounded pipeline for scraped/FAQ sources
+                is_partial = top_score < cfg.confident_threshold
+
+                gen_result = self._format_grounded_answer(
+                    query, top_chunks, lang,
+                    history=history,
+                    partial_context=is_partial,
                 )
                 debug["context_sent_to_llm"] = gen_result["context_sent"]
-                debug["draft_answer"] = gen_result["answer"]
-                debug["removed_claims"] = []
-                debug["verified"] = True
-                debug["context_confidence"] = "confident (admin source)"
+                debug["draft_answer"] = gen_result["draft_answer"]
+                debug["removed_claims"] = gen_result["removed_claims"]
+                debug["verified"] = len(gen_result["removed_claims"]) == 0
+                debug["context_confidence"] = "partial" if is_partial else "confident"
 
                 result = (gen_result["answer"], debug)
                 _cache_result(result)
                 return result
 
-            # Standard grounded pipeline for scraped/FAQ sources
-            is_partial = top_score < cfg.confident_threshold
-
-            gen_result = self._format_grounded_answer(
-                query, top_chunks, lang,
-                history=history,
-                partial_context=is_partial,
-            )
-            debug["context_sent_to_llm"] = gen_result["context_sent"]
-            debug["draft_answer"] = gen_result["draft_answer"]
-            debug["removed_claims"] = gen_result["removed_claims"]
-            debug["verified"] = len(gen_result["removed_claims"]) == 0
-            debug["context_confidence"] = "partial" if is_partial else "confident"
-
-            result = (gen_result["answer"], debug)
-            _cache_result(result)
-            return result
+            except LLMUnavailableError:
+                # Partial degradation: retrieval succeeded but LLM generation failed.
+                # Return top 3 chunk summaries as a raw "Here's what I found:" response.
+                logger.warning("LLM generation failed after successful retrieval, returning raw chunks")
+                answer = self._format_raw_chunks_fallback(top_chunks[:3], lang)
+                debug["degradation_type"] = "llm_generation_failed"
+                debug["pipeline"] = "raw_chunks_fallback"
+                return answer, debug
 
         # --- Fallback: context too weak, abstain rather than hallucinate ---
         debug["chosen_source"] = "none (below threshold)"
@@ -921,18 +962,104 @@ class LibraryChatbot:
         })
 
         try:
-            resp = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+            answer = chat_completion(
                 messages=messages,
-                temperature=0.0,
-                top_p=0.9,
                 max_tokens=600,
+                top_p=0.9,
             )
-            answer = resp.choices[0].message.content
-        except Exception as e:
+        except (LLMUnavailableError, Exception) as e:
             logger.error(f"Faculty text answer generation failed: {e}")
             # Fallback: return the note content directly
             answer = context
+
+        return {
+            "answer": answer,
+            "context_sent": context,
+        }
+
+    def _format_fast_path_answer(
+        self,
+        query: str,
+        chunks: List[dict],
+        lang: str,
+        history: Optional[List[dict]] = None,
+    ) -> dict:
+        """Generate answer for high-confidence matches (rerank score >= 0.85).
+
+        Skips the full grounding pipeline (answerability, evidence planning,
+        claim audit = 3 LLM calls) and uses a single generation call with
+        the standard grounding system prompt. Safe because:
+          - The reranker already confirmed strong evidence support (>= 0.85)
+          - The grounding system prompt still enforces cite-or-remove rules
+          - The regex safety check in verifier.py still runs on the output
+
+        This reduces latency from ~5 LLM calls to ~2 for common queries.
+        """
+        from .verifier import check_output_safety
+
+        # Build context with source tags (same format as grounded pipeline)
+        context_parts = []
+        sources = []
+        for i, chunk in enumerate(chunks):
+            text = _get_chunk_text(chunk)
+            meta = chunk.get("metadata", {})
+            page_title = meta.get("page_title", meta.get("title", meta.get("question", f"Source {i+1}")))
+            section = meta.get("section_title", "")
+            url = meta.get("page_url", meta.get("url", ""))
+
+            header = f"[Source: {page_title}"
+            if section:
+                header += f" > {section}"
+            header += "]"
+
+            context_parts.append(f"{header}\n{text[:3000]}")
+            if url and url not in [s.get("url") for s in sources]:
+                sources.append({"title": page_title, "url": url, "section": section})
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        history_msgs = self._build_history_messages(history)
+        system_prompt = _SYSTEM_PROMPTS[lang]
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history_msgs)
+        messages.append({
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {query}",
+        })
+
+        try:
+            answer = chat_completion(
+                messages=messages,
+                max_tokens=800,
+                top_p=0.85,
+            )
+        except (LLMUnavailableError, Exception) as e:
+            logger.error(f"Fast-path generation failed: {e}")
+            answer = context_parts[0] if context_parts else "An error occurred."
+
+        # Quick safety check (regex only, no LLM)
+        is_safe, violation = check_output_safety(answer)
+        if not is_safe:
+            logger.warning(f"Fast-path answer failed safety check: {violation}")
+            if lang == Config.LANG_AR:
+                answer = "يمكنني فقط الإجابة على الأسئلة المتعلقة بخدمات وموارد مكتبة الجامعة الأمريكية في بيروت."
+            else:
+                answer = "I can only answer questions about AUB library services and resources."
+
+        # Append source attribution
+        if sources:
+            templates = _RESPONSE_TEMPLATES[lang]
+            source_links = []
+            for s in sources:
+                link_text = s["title"]
+                if s.get("section"):
+                    link_text += f" > {s['section']}"
+                if s["url"]:
+                    source_links.append(f"[{link_text}]({s['url']})")
+                else:
+                    source_links.append(link_text)
+            answer += f"\n\n{templates['sources_label']} {' | '.join(source_links)}"
 
         return {
             "answer": answer,
@@ -960,7 +1087,7 @@ class LibraryChatbot:
         """
         from .grounding import (
             classify_answerability, classify_query_risk,
-            plan_evidence, audit_claims,
+            plan_evidence, generate_and_verify,
         )
 
         # --- Build context ---
@@ -1050,79 +1177,22 @@ class LibraryChatbot:
                 "removed_claims": [f"EVIDENCE_PLAN: no claims found. Unsupported: {unsupported_aspects}"],
             }
 
-        # --- Step 4: Generate answer constrained by evidence plan ---
-        # The generation prompt includes the evidence plan so the LLM can
-        # only use pre-verified claims and must flag unsupported aspects.
+        # --- Step 4: Generate answer with inline verification ---
+        # Single LLM call that generates the answer constrained by the evidence
+        # plan AND verifies each claim inline. Replaces the previous separate
+        # generation + post-generation audit (saves one LLM call).
         system_prompt = _SYSTEM_PROMPTS[lang]
-
-        # Build the evidence constraint for the generation prompt
-        evidence_section = "=== PRE-VERIFIED EVIDENCE (use ONLY these facts) ===\n"
-        for i, claim in enumerate(planned_claims):
-            evidence_section += (
-                f"{i+1}. Claim: {claim.get('claim', '')}\n"
-                f"   Evidence: \"{claim.get('evidence', '')}\"\n"
-                f"   Source: {claim.get('source', 'unknown')}\n"
-            )
-
-        if unsupported_aspects:
-            evidence_section += (
-                "\n=== UNSUPPORTED ASPECTS (you MUST say you don't have info) ===\n"
-                + "\n".join(f"- {asp}" for asp in unsupported_aspects)
-            )
-
-        # Add partial-context warning if applicable
-        partial_note = ""
-        if partial_context or answer_level == "PARTIAL":
-            partial_note = (
-                "\n\n⚠️ PARTIAL CONTEXT: Only some aspects of the question are supported. "
-                "You MUST:\n"
-                "- State ONLY the supported facts listed above\n"
-                "- Explicitly say what information is missing\n"
-                "- Do NOT fill in gaps with general knowledge\n"
-            )
-
         history_msgs = self._build_history_messages(history)
 
-        messages = [{"role": "system", "content": system_prompt + partial_note}]
-        messages.extend(history_msgs)
-        messages.append({
-            "role": "user",
-            "content": (
-                f"{evidence_section}\n\n"
-                f"Context:\n{context}\n\n"
-                f"Question: {query}\n\n"
-                "Write a response using ONLY the pre-verified evidence above. "
-                "For any unsupported aspect, explicitly state you don't have that information. "
-                "Cite sources for every claim."
-            ),
-        })
-
-        draft_answer = ""
-        removed_claims = []
-
-        try:
-            resp = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.0,
-                top_p=0.85,
-                max_tokens=800,
-            )
-            draft_answer = resp.choices[0].message.content
-        except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
-            # Fail-safe: construct answer directly from evidence plan
-            parts = []
-            for c in planned_claims[:5]:
-                parts.append(f"- {c.get('claim', '')} {c.get('source', '')}")
-            draft_answer = "\n".join(parts) if parts else "An error occurred."
-
-        # --- Step 5: Claim-level audit ---
-        # Split the draft into atomic claims and verify each one
-        # individually against the context.  This catches subtle
-        # hallucinations that the generation step may have introduced
-        # despite the evidence constraint.
-        answer, removed_claims = audit_claims(draft_answer, context, lang)
+        answer, draft_answer, removed_claims = generate_and_verify(
+            query=query,
+            context=context,
+            evidence_plan=evidence_plan,
+            system_prompt=system_prompt,
+            lang=lang,
+            partial_context=partial_context or answer_level == "PARTIAL",
+            history_msgs=history_msgs,
+        )
 
         # Append source attribution
         if sources:
@@ -1144,6 +1214,34 @@ class LibraryChatbot:
             "draft_answer": draft_answer,
             "removed_claims": removed_claims,
         }
+
+    def _format_raw_chunks_fallback(
+        self, chunks: List[dict], lang: str,
+    ) -> str:
+        """Format raw chunk summaries when LLM generation is unavailable.
+
+        This is a partial-degradation fallback: retrieval succeeded but the
+        LLM cannot generate a natural-language answer. Return the top chunks
+        as-is so the user gets something useful.
+        """
+        if lang == Config.LANG_AR:
+            header = "عذراً، لا أستطيع صياغة إجابة كاملة حالياً. إليك ما وجدته:"
+        else:
+            header = "I'm unable to generate a full answer right now. Here's what I found:"
+
+        parts = [header, ""]
+        for i, chunk in enumerate(chunks):
+            text = _get_chunk_text(chunk)
+            meta = chunk.get("metadata", {})
+            title = meta.get("page_title", meta.get("title", meta.get("question", f"Source {i+1}")))
+            # Truncate long chunks
+            if len(text) > 500:
+                text = text[:497] + "..."
+            parts.append(f"**{title}**")
+            parts.append(text)
+            parts.append("")
+
+        return "\n".join(parts)
 
     def _format_db_recommendations(
         self, candidates: List[dict], lang: str, k: int = 5
@@ -1200,15 +1298,12 @@ class LibraryChatbot:
                 ),
             })
 
-            resp = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+            return chat_completion(
                 messages=messages,
-                temperature=0.0,
-                top_p=0.9,
                 max_tokens=500,
+                top_p=0.9,
             )
-            return resp.choices[0].message.content
-        except Exception as e:
+        except (LLMUnavailableError, Exception) as e:
             logger.error(f"Feedback answer formatting failed: {e}")
             # Fallback: return the corrected answer directly
             if lang == Config.LANG_AR:
@@ -1222,8 +1317,7 @@ class LibraryChatbot:
     def _translate_to_arabic(self, text: str) -> str:
         """Translate an English text snippet to Arabic using the LLM."""
         try:
-            resp = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+            return chat_completion(
                 messages=[
                     {
                         "role": "system",
@@ -1250,7 +1344,6 @@ class LibraryChatbot:
                 temperature=0.1,
                 max_tokens=500,
             )
-            return resp.choices[0].message.content
-        except Exception as e:
+        except (LLMUnavailableError, Exception) as e:
             logger.error(f"Translation to Arabic failed: {e}")
             return text

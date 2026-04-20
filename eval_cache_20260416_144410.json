@@ -1,0 +1,249 @@
+{
+  "metadata": {
+    "timestamp": "2026-04-16T11:44:10.177264Z",
+    "num_query_pairs": 10,
+    "semantic_threshold": 0.95,
+    "cache_max_size": 1024,
+    "cache_ttl_seconds": 3600
+  },
+  "aggregate": {
+    "cold_avg_latency_ms": 8894.0,
+    "exact_avg_latency_ms": 589.4,
+    "semantic_avg_latency_ms": 5963.8,
+    "exact_hit_rate": 1.0,
+    "semantic_hit_rate": 0.1,
+    "true_semantic_hit_rate": 0.0,
+    "speedup_exact": 15.09,
+    "speedup_semantic": 1.49,
+    "api_calls_saved_exact": 30,
+    "api_calls_saved_semantic": 2
+  },
+  "cold_round": [
+    {
+      "query": "What are the library opening hours?",
+      "latency_ms": 7902.8,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How do I borrow a book from the library?",
+      "latency_ms": 6693.7,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What are the fines for overdue books?",
+      "latency_ms": 6145.0,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Can I reserve a study room?",
+      "latency_ms": 15237.6,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How do I renew a borrowed book?",
+      "latency_ms": 8010.8,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Can I access databases from off-campus?",
+      "latency_ms": 6550.5,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What printing services are available at the library?",
+      "latency_ms": 7986.9,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How do I request an interlibrary loan?",
+      "latency_ms": 11773.6,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How many books can I borrow at once?",
+      "latency_ms": 6887.7,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Which databases are available for medical research?",
+      "latency_ms": 11751.7,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    }
+  ],
+  "exact_round": [
+    {
+      "query": "What are the library opening hours?",
+      "latency_ms": 809.6,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How do I borrow a book from the library?",
+      "latency_ms": 707.5,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What are the fines for overdue books?",
+      "latency_ms": 742.8,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Can I reserve a study room?",
+      "latency_ms": 508.6,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How do I renew a borrowed book?",
+      "latency_ms": 717.4,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Can I access databases from off-campus?",
+      "latency_ms": 510.5,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What printing services are available at the library?",
+      "latency_ms": 398.3,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How do I request an interlibrary loan?",
+      "latency_ms": 735.2,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How many books can I borrow at once?",
+      "latency_ms": 400.2,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Which databases are available for medical research?",
+      "latency_ms": 363.9,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    }
+  ],
+  "semantic_round": [
+    {
+      "query": "When is the library open?",
+      "latency_ms": 2404.2,
+      "cache_hit": true,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What is the process for borrowing books?",
+      "latency_ms": 7879.4,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How much do I pay for returning books late?",
+      "latency_ms": 6656.0,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "How do I book a group study room?",
+      "latency_ms": 8703.3,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Can I extend my book loan period?",
+      "latency_ms": 6153.3,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Is remote access to library resources possible?",
+      "latency_ms": 6035.0,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "Where can I print documents in the library?",
+      "latency_ms": 4499.2,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What is the ILL service at the AUB library?",
+      "latency_ms": 6767.0,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What is the borrowing limit for students?",
+      "latency_ms": 3476.8,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    },
+    {
+      "query": "What medical databases does AUB library provide?",
+      "latency_ms": 7063.3,
+      "cache_hit": false,
+      "semantic_cache_hit": false
+    }
+  ],
+  "query_pairs": [
+    {
+      "original": "What are the library opening hours?",
+      "paraphrase": "When is the library open?"
+    },
+    {
+      "original": "How do I borrow a book from the library?",
+      "paraphrase": "What is the process for borrowing books?"
+    },
+    {
+      "original": "What are the fines for overdue books?",
+      "paraphrase": "How much do I pay for returning books late?"
+    },
+    {
+      "original": "Can I reserve a study room?",
+      "paraphrase": "How do I book a group study room?"
+    },
+    {
+      "original": "How do I renew a borrowed book?",
+      "paraphrase": "Can I extend my book loan period?"
+    },
+    {
+      "original": "Can I access databases from off-campus?",
+      "paraphrase": "Is remote access to library resources possible?"
+    },
+    {
+      "original": "What printing services are available at the library?",
+      "paraphrase": "Where can I print documents in the library?"
+    },
+    {
+      "original": "How do I request an interlibrary loan?",
+      "paraphrase": "What is the ILL service at the AUB library?"
+    },
+    {
+      "original": "How many books can I borrow at once?",
+      "paraphrase": "What is the borrowing limit for students?"
+    },
+    {
+      "original": "Which databases are available for medical research?",
+      "paraphrase": "What medical databases does AUB library provide?"
+    }
+  ]
+}

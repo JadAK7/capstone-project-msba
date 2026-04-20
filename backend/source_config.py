@@ -9,6 +9,10 @@ Source taxonomy:
   - databases      (databases table)     — Separate: routed via intent detection, not ranked
 
 All tuning knobs for source-aware retrieval live here.
+
+Trust boosts are applied ONCE, at the reranking stage only (reranker.py).
+RRF scores in retriever.py are pure retrieval-quality signals with no trust bias,
+so that lower-trust sources can still surface when they have the best content.
 """
 
 from dataclasses import dataclass, field
@@ -121,6 +125,12 @@ class SourcePriorityConfig:
     # --- Confidence thresholds (for answer generation) ---
     confident_threshold: float = 0.60
     partial_threshold: float = 0.45
+
+    # --- Fast-path threshold ---
+    # When the top rerank score exceeds this, skip the full grounding pipeline
+    # (answerability, evidence planning, claim audit) and use a single LLM call.
+    # Set high enough (0.85) that we only fast-path when evidence is very strong.
+    fast_path_threshold: float = 0.85
 
     # --- Faculty text (custom_notes) vector floor ---
     # Custom notes are admin-curated answers. The LLM reranker scores "evidence

@@ -28,6 +28,7 @@ from .source_config import (
     get_source_type, get_source_trust_for_table, is_freshness_sensitive,
     FACULTY_TEXT, SCRAPED_WEBSITE, FACULTY_FAQ,
 )
+from .intent_classifier import classify_intent
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Synonym expansion for keyword search
 # ---------------------------------------------------------------------------
 
-_SYNONYMS = {
+_SYNONYMS_EN = {
     "hours": ["opening hours", "schedule", "timing", "open", "close"],
     "borrow": ["loan", "checkout", "check out", "lending"],
     "return": ["return", "give back"],
@@ -52,107 +53,61 @@ _SYNONYMS = {
     "card": ["id card", "library card", "membership"],
 }
 
+_SYNONYMS_AR = {
+    "\u0633\u0627\u0639\u0627\u062a": ["\u0645\u0648\u0627\u0639\u064a\u062f", "\u0623\u0648\u0642\u0627\u062a", "\u062f\u0648\u0627\u0645"],  # ساعات → مواعيد، أوقات، دوام
+    "\u0627\u0633\u062a\u0639\u0627\u0631\u0629": ["\u0625\u0639\u0627\u0631\u0629", "\u0627\u0633\u062a\u0644\u0627\u0641"],  # استعارة → إعارة، استلاف
+    "\u0625\u0631\u062c\u0627\u0639": ["\u0631\u062f", "\u0625\u0639\u0627\u062f\u0629"],  # إرجاع → رد، إعادة
+    "\u062a\u062c\u062f\u064a\u062f": ["\u062a\u0645\u062f\u064a\u062f"],  # تجديد → تمديد
+    "\u063a\u0631\u0627\u0645\u0629": ["\u063a\u0631\u0627\u0645\u0627\u062a", "\u0631\u0633\u0648\u0645 \u062a\u0623\u062e\u064a\u0631"],  # غرامة → غرامات، رسوم تأخير
+    "\u0648\u0627\u064a \u0641\u0627\u064a": ["\u0627\u0646\u062a\u0631\u0646\u062a", "\u0625\u0646\u062a\u0631\u0646\u062a", "\u0634\u0628\u0643\u0629"],  # واي فاي → انترنت، إنترنت، شبكة
+    "\u0637\u0628\u0627\u0639\u0629": ["\u0637\u0628\u0639", "\u0645\u0633\u062d", "\u062a\u0635\u0648\u064a\u0631"],  # طباعة → طبع، مسح، تصوير
+    "\u062d\u062c\u0632": ["\u062d\u062c\u0648\u0632\u0627\u062a", "\u062d\u062c\u0632 \u063a\u0631\u0641\u0629"],  # حجز → حجوزات، حجز غرفة
+    "\u063a\u0631\u0641\u0629": ["\u063a\u0631\u0641\u0629 \u062f\u0631\u0627\u0633\u0629", "\u0642\u0627\u0639\u0629", "\u063a\u0631\u0641\u0629 \u0645\u0637\u0627\u0644\u0639\u0629"],  # غرفة → غرفة دراسة، قاعة، غرفة مطالعة
+    "\u0642\u0627\u0639\u062f\u0629 \u0628\u064a\u0627\u0646\u0627\u062a": ["\u0642\u0648\u0627\u0639\u062f \u0628\u064a\u0627\u0646\u0627\u062a", "\u0645\u0635\u0627\u062f\u0631 \u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a\u0629"],  # قاعدة بيانات → قواعد بيانات، مصادر إلكترونية
+    "\u0631\u0633\u0627\u0644\u0629": ["\u0623\u0637\u0631\u0648\u062d\u0629", "\u0628\u062d\u062b", "\u0631\u0633\u0627\u0626\u0644"],  # رسالة → أطروحة، بحث، رسائل
+    "\u0628\u0637\u0627\u0642\u0629": ["\u0628\u0637\u0627\u0642\u0629 \u0645\u0643\u062a\u0628\u0629", "\u0647\u0648\u064a\u0629", "\u0639\u0636\u0648\u064a\u0629"],  # بطاقة → بطاقة مكتبة، هوية، عضوية
+}
+
+# Regex to detect Arabic characters in the query
+_ARABIC_CHARS_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
+
 
 def _expand_synonyms(query: str) -> str:
-    """Expand query with synonyms for better keyword recall."""
+    """Expand query with synonyms for better keyword recall.
+
+    Supports both English and Arabic. For Arabic queries, expansions are
+    drawn from the Arabic synonym table. For English, from the English one.
+    If the query is mixed, both tables are checked.
+    """
     query_lower = query.lower()
     expansions = []
 
-    for keyword, synonyms in _SYNONYMS.items():
+    has_arabic = bool(_ARABIC_CHARS_RE.search(query))
+
+    # English synonyms
+    for keyword, synonyms in _SYNONYMS_EN.items():
         if keyword in query_lower:
             for syn in synonyms:
                 if syn not in query_lower:
                     expansions.append(syn)
-                    break  # One expansion per keyword to avoid noise
+                    break
+
+    # Arabic synonyms
+    if has_arabic:
+        for keyword, synonyms in _SYNONYMS_AR.items():
+            if keyword in query:
+                for syn in synonyms:
+                    if syn not in query:
+                        expansions.append(syn)
+                        break
 
     if expansions:
         return f"{query} {' '.join(expansions)}"
     return query
 
 
-# ---------------------------------------------------------------------------
-# Intent-based table + page_type filtering
-# ---------------------------------------------------------------------------
 
-_HOURS_PATTERN = re.compile(
-    r"\b(hours?|open(ing)?|clos(e|ing)|schedule|timing|when\s+(is|does|are)|"
-    r"what\s+time)\b",
-    re.IGNORECASE,
-)
-
-_FAQ_PATTERN = re.compile(
-    r"\b(how\s+(do|can|to)|what\s+is|where\s+(is|can|do)|can\s+i|"
-    r"is\s+(it|there)|do\s+(you|i|they)|policy|policies|rules?|"
-    r"allow(ed)?|permit(ted)?|borrow|return|renew|fine|overdue|"
-    r"print|scan|copy|wifi|internet|card|membership|access)\b",
-    re.IGNORECASE,
-)
-
-_DB_PATTERN = re.compile(
-    r"\b(database|db|recommend|ieee|scopus|pubmed|jstor|proquest|"
-    r"web\s+of\s+science|ebsco|e-?resource|journal|article|paper|"
-    r"research\s+(source|database|tool)|find\s+articles?|"
-    r"search\s+for\s+papers?)\b",
-    re.IGNORECASE,
-)
-
-_CONTACT_PATTERN = re.compile(
-    r"\b(contact|email|phone|call|reach|talk\s+to|help\s+desk|"
-    r"librarian|staff|ask\s+a\s+librarian|directions?|location|"
-    r"where\s+is|floor|map)\b",
-    re.IGNORECASE,
-)
-
-
-def _classify_query_intent(query: str) -> dict:
-    """Classify query intent for table/page_type filtering.
-
-    Returns dict with:
-        tables: list of tables to prioritize (or None for all)
-        page_types: list of page_type values to filter on (for document_chunks)
-        intent: string label for logging
-    """
-    q = query.lower()
-
-    # Database intent: only search databases table (+ FAQ for "how to access" type)
-    if _DB_PATTERN.search(q):
-        return {
-            "tables": ["databases", "faq", "document_chunks"],
-            "page_types": ["database_page", "service"],
-            "intent": "database",
-        }
-
-    # Hours/schedule intent: search all page types — hours info can appear on
-    # pages classified as "general", "service", or "hours_contact"
-    if _HOURS_PATTERN.search(q):
-        return {
-            "tables": ["faq", "document_chunks", "library_pages"],
-            "page_types": None,
-            "intent": "hours",
-        }
-
-    # Contact/location intent: also don't restrict page types
-    if _CONTACT_PATTERN.search(q):
-        return {
-            "tables": ["faq", "document_chunks", "library_pages"],
-            "page_types": None,
-            "intent": "contact",
-        }
-
-    # General FAQ-style questions
-    if _FAQ_PATTERN.search(q):
-        return {
-            "tables": ["faq", "document_chunks", "library_pages"],
-            "page_types": None,  # search all page types
-            "intent": "faq",
-        }
-
-    # Default: search everything (including custom_notes)
-    return {
-        "tables": None,
-        "page_types": None,
-        "intent": "general",
-    }
+# Intent classification is now handled by intent_classifier.py
 
 
 # ---------------------------------------------------------------------------
@@ -186,15 +141,20 @@ def _keyword_search(
     # Expand query with synonyms for better recall
     expanded_query = _expand_synonyms(query)
 
+    # Use 'simple' text search config for Arabic (no stemming, but proper tokenization).
+    # The 'english' config doesn't handle Arabic script at all.
+    has_arabic = bool(_ARABIC_CHARS_RE.search(query))
+    fts_config = "simple" if has_arabic else "english"
+
     # Combined: phrase match (boosted 2x) + plain match
     fts_sql = (
         f"SELECT id, "
-        f"(ts_rank_cd(to_tsvector('english', {text_column}), phraseto_tsquery('english', %s)) * 2.0 "
-        f"+ ts_rank_cd(to_tsvector('english', {text_column}), plainto_tsquery('english', %s))) AS rank, "
+        f"(ts_rank_cd(to_tsvector('{fts_config}', {text_column}), phraseto_tsquery('{fts_config}', %s)) * 2.0 "
+        f"+ ts_rank_cd(to_tsvector('{fts_config}', {text_column}), plainto_tsquery('{fts_config}', %s))) AS rank, "
         f"{cols} "
         f"FROM {table} "
-        f"WHERE (to_tsvector('english', {text_column}) @@ plainto_tsquery('english', %s) "
-        f"   OR to_tsvector('english', {text_column}) @@ phraseto_tsquery('english', %s)) "
+        f"WHERE (to_tsvector('{fts_config}', {text_column}) @@ plainto_tsquery('{fts_config}', %s) "
+        f"   OR to_tsvector('{fts_config}', {text_column}) @@ phraseto_tsquery('{fts_config}', %s)) "
         f"{type_clause} "
         f"ORDER BY rank DESC "
         f"LIMIT %s"
@@ -269,14 +229,19 @@ def _vector_search(
     metadata_cols: List[str],
     n_results: int = 20,
     page_type_filter: Optional[List[str]] = None,
+    query_vec: Optional[np.ndarray] = None,
 ) -> List[dict]:
     """Semantic search using pgvector cosine distance.
 
     Optionally filters by page_type for the document_chunks table.
+    If query_vec is provided, skips embedding generation (avoids redundant API calls).
     """
     try:
-        query_embedding = embed_text(query)
-        query_vec = np.array(query_embedding)
+        if query_vec is None:
+            query_embedding = embed_text(query)
+            query_vec = np.array(query_embedding)
+        else:
+            query_vec = np.array(query_vec)
         cols = ", ".join(metadata_cols)
 
         # Build page_type filter
@@ -453,6 +418,7 @@ def hybrid_retrieve(
     n_keyword: int = 15,
     n_final: int = 30,
     page_type_filter: Optional[List[str]] = None,
+    query_embedding: Optional[List[float]] = None,
 ) -> List[dict]:
     """Perform source-aware hybrid retrieval across specified tables.
 
@@ -493,6 +459,11 @@ def hybrid_retrieve(
     # Check if query is time-sensitive (for freshness boost on scraped content)
     freshness_sensitive = is_freshness_sensitive(query)
 
+    # Embed query ONCE and reuse across all table searches
+    if query_embedding is None:
+        query_embedding = embed_text(query)
+    query_vec = np.array(query_embedding)
+
     all_results = []
 
     for table in valid_tables:
@@ -510,6 +481,7 @@ def hybrid_retrieve(
         vector_results = _vector_search(
             table, query, config["metadata_cols"], table_n_vector,
             page_type_filter=pt_filter,
+            query_vec=query_vec,
         )
         keyword_results = _keyword_search(
             table, query, config["text_column"], config["metadata_cols"],
@@ -518,25 +490,18 @@ def hybrid_retrieve(
 
         merged = _reciprocal_rank_fusion(vector_results, keyword_results)
 
-        # Apply source priority boost to RRF scores.
-        # This is a small additive boost proportional to source trust,
-        # giving higher-priority sources a gentle advantage.
-        source_boost = cfg.rrf_source_boost_weight * source_trust
-
-        # Extra boost for scraped content on time-sensitive queries
-        if freshness_sensitive and source_type == SCRAPED_WEBSITE:
-            source_boost += cfg.freshness_boost * cfg.rrf_source_boost_weight
-
+        # Source trust boosts are applied once, at reranking only (reranker.py).
+        # RRF scores here are pure retrieval-quality signals.
         for result in merged:
             result["source_table"] = table
             result["source_label"] = config["source_label"]
             result["source_type"] = source_type
             result["source_trust"] = source_trust
-            result["rrf_score"] += source_boost
+            result["freshness_sensitive"] = freshness_sensitive
 
         all_results.extend(merged)
 
-    # Sort by boosted RRF score across all tables
+    # Sort by RRF score across all tables
     all_results.sort(key=lambda x: x["rrf_score"], reverse=True)
 
     # Ensure source diversity: don't let one source crowd out the pool
@@ -561,8 +526,8 @@ def hybrid_retrieve(
 
 
 def classify_query_intent(query: str) -> dict:
-    """Public API for query intent classification. Used by chatbot.py."""
-    return _classify_query_intent(query)
+    """Public API for query intent classification. Delegates to intent_classifier."""
+    return classify_intent(query)
 
 
 def vector_only_retrieve(

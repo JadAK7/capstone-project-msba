@@ -12,18 +12,9 @@ import logging
 import os
 from typing import List, Optional, Tuple
 
-from openai import OpenAI
+from .llm_client import chat_completion, LLMUnavailableError
 
 logger = logging.getLogger(__name__)
-
-_client: Optional[OpenAI] = None
-
-
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    return _client
 
 
 # ---------------------------------------------------------------------------
@@ -116,9 +107,7 @@ def verify_answer(
 
     # --- LLM-based claim verification ---
     try:
-        client = _get_client()
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        raw = chat_completion(
             messages=[
                 {
                     "role": "system",
@@ -171,11 +160,8 @@ def verify_answer(
                     ),
                 },
             ],
-            temperature=0.0,
             max_tokens=1000,
         )
-
-        raw = resp.choices[0].message.content.strip()
 
         # Parse JSON response
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)

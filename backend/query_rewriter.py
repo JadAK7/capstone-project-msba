@@ -17,18 +17,9 @@ import re
 import logging
 from typing import List, Optional, Tuple
 
-from openai import OpenAI
+from .llm_client import chat_completion, LLMUnavailableError
 
 logger = logging.getLogger(__name__)
-
-_client: Optional[OpenAI] = None
-
-
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    return _client
 
 
 # ---------------------------------------------------------------------------
@@ -123,14 +114,10 @@ def rewrite_query(
     messages.append({"role": "user", "content": original})
 
     try:
-        client = _get_client()
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        rewritten = chat_completion(
             messages=messages,
-            temperature=0.0,
             max_tokens=100,
         )
-        rewritten = resp.choices[0].message.content.strip()
 
         # Sanity check: if rewriter returned something too long or empty, fallback
         if not rewritten or len(rewritten) > 300:
