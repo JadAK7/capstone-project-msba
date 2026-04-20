@@ -33,6 +33,12 @@ scraped_pages_cache.json
 # Chat analytics logs (runtime-generated)
 chat_logs.json
 
+# Evaluation results (runtime-generated)
+eval_*.json
+
+# Claude Code project instructions
+CLAUDE.md
+
 # Claude Code configuration
 .claude/
 
