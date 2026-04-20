@@ -14,6 +14,11 @@ from pgvector.psycopg2 import register_vector
 
 logger = logging.getLogger(__name__)
 
+
+class DatabaseUnavailableError(Exception):
+    """Raised when the database connection cannot be acquired."""
+    pass
+
 _pool: pool.ThreadedConnectionPool | None = None
 
 DEFAULT_DATABASE_URL = "postgresql://aub_library:aub_library_pass@localhost:5432/aub_library"
@@ -134,6 +139,21 @@ CREATE INDEX IF NOT EXISTS idx_feedback_conversation ON chat_feedback (conversat
 CREATE INDEX IF NOT EXISTS idx_feedback_rating ON chat_feedback (rating);
 CREATE INDEX IF NOT EXISTS idx_feedback_embedding ON chat_feedback USING hnsw (embedding vector_cosine_ops)
     WHERE embedding IS NOT NULL;
+
+-- Escalations: student requests forwarded to a librarian
+CREATE TABLE IF NOT EXISTS escalations (
+    id SERIAL PRIMARY KEY,
+    student_email TEXT NOT NULL,
+    student_name TEXT NOT NULL DEFAULT '',
+    question TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending, answered, closed
+    admin_response TEXT,
+    response_sent_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations (status);
+CREATE INDEX IF NOT EXISTS idx_escalations_created ON escalations (created_at DESC);
 """
 
 
@@ -225,11 +245,19 @@ def get_connection():
 
     Registers the pgvector type on each connection so numpy arrays
     and Python lists are transparently serialized to vector columns.
+
+    Raises DatabaseUnavailableError if the pool is not initialized or
+    a connection cannot be acquired.
     """
     if _pool is None:
-        raise RuntimeError("Database pool not initialized. Call init_db() first.")
+        raise DatabaseUnavailableError("Database pool not initialized. Call init_db() first.")
 
-    conn = _pool.getconn()
+    try:
+        conn = _pool.getconn()
+    except psycopg2.Error as e:
+        logger.error(f"Failed to acquire database connection: {e}")
+        raise DatabaseUnavailableError(f"Cannot connect to database: {e}") from e
+
     try:
         register_vector(conn)
         yield conn

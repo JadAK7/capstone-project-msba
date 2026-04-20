@@ -17,23 +17,13 @@ import logging
 import os
 from typing import List, Optional
 
-from openai import OpenAI
-
+from .llm_client import chat_completion, LLMUnavailableError
 from .source_config import (
     SOURCE_CONFIG, get_source_type, get_source_trust,
     FACULTY_TEXT, SCRAPED_WEBSITE, FACULTY_FAQ,
 )
 
 logger = logging.getLogger(__name__)
-
-_client: Optional[OpenAI] = None
-
-
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    return _client
 
 
 def _get_chunk_text(result: dict) -> str:
@@ -139,10 +129,16 @@ def _apply_source_priority_boost(candidates: List[dict]) -> None:
         if source_type == FACULTY_FAQ:
             raw_score *= cfg.faq_score_dampening
 
-        # Source priority boost: proportional to trust tier
+        # Source priority boost: proportional to trust tier.
+        # This is the ONLY place trust boosts are applied (not in RRF retrieval).
         # This is a soft tiebreaker — when two chunks have similar evidence scores,
         # the higher-trust source wins.
         boost = cfg.rerank_source_boost_weight * trust
+
+        # Freshness boost for scraped content on time-sensitive queries
+        if source_type == SCRAPED_WEBSITE and cand.get("freshness_sensitive"):
+            boost += cfg.freshness_boost * cfg.rerank_source_boost_weight
+
         final_score = raw_score + boost
 
         cand["rerank_score"] = min(1.0, final_score)
@@ -205,9 +201,7 @@ def rerank(
     chunks_text = "\n---\n".join(chunk_descriptions)
 
     try:
-        client = _get_client()
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        raw = chat_completion(
             messages=[
                 {
                     "role": "system",
@@ -238,11 +232,8 @@ def rerank(
                     "content": f"Question: {query}\n\nPassages:\n{chunks_text}",
                 },
             ],
-            temperature=0.0,
             max_tokens=600,
         )
-
-        raw = resp.choices[0].message.content.strip()
         json_match = re.search(r"\[.*\]", raw, re.DOTALL)
         if json_match:
             scores = json.loads(json_match.group())

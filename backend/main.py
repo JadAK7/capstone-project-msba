@@ -8,18 +8,24 @@ import os
 import time
 import logging
 import threading
+import hashlib
+import hmac
+import secrets
+import json as _json
 from typing import Optional, List
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-
-import json as _json
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from .chatbot import LibraryChatbot
 from .database import init_db, close_db, get_connection
@@ -27,11 +33,17 @@ from .index_builder import IndexBuilder
 from .admin import AdminManager, set_last_index_build_time, set_last_scrape_time
 from .analytics import ChatLogger, AnalyticsComputer
 from .evaluation import evaluate_single, run_evaluation_pipeline
+from .llm_client import is_llm_available
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Rate limiter — sliding window per IP
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(title="AUB Libraries Assistant API")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS for React dev server
 app.add_middleware(
@@ -40,6 +52,54 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Admin authentication (env-based credentials + HMAC token)
+# ---------------------------------------------------------------------------
+
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+# Random secret generated per process — tokens invalidate on restart
+_TOKEN_SECRET = os.environ.get("ADMIN_TOKEN_SECRET", secrets.token_hex(32))
+_TOKEN_TTL = 24 * 3600  # 24 hours
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _make_token(username: str) -> str:
+    """Create a signed token: base64(payload).signature"""
+    import base64
+    payload = _json.dumps({"sub": username, "exp": int(time.time()) + _TOKEN_TTL})
+    payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
+    sig = hmac.new(_TOKEN_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def _verify_token(token: str) -> Optional[str]:
+    """Verify token signature and expiration. Returns username or None."""
+    import base64
+    try:
+        payload_b64, sig = token.rsplit(".", 1)
+        expected_sig = hmac.new(_TOKEN_SECRET.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+        if payload.get("exp", 0) < time.time():
+            return None
+        return payload.get("sub")
+    except Exception:
+        return None
+
+
+def require_admin(credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme)):
+    """FastAPI dependency that protects admin endpoints."""
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    username = _verify_token(credentials.credentials)
+    if username is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return username
+
 
 # Global instances
 _chatbot: Optional[LibraryChatbot] = None
@@ -84,6 +144,13 @@ def get_admin_manager() -> AdminManager:
     return _admin_manager
 
 
+def _invalidate_cache_after_edit():
+    """Clear the response cache after an admin content edit (FAQ, DB, custom note, etc.)."""
+    global _chatbot
+    if _chatbot is not None:
+        _chatbot.clear_cache()
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -124,6 +191,63 @@ class FeedbackRequest(BaseModel):
     source: Optional[str] = "admin"  # "admin" or "user"
 
 
+class EscalationRequest(BaseModel):
+    student_email: str
+    student_name: Optional[str] = ""
+    question: str
+
+
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# ---------------------------------------------------------------------------
+# Admin login
+# ---------------------------------------------------------------------------
+
+@app.post("/api/admin/login")
+def admin_login(req: LoginRequest):
+    """Authenticate admin and return a bearer token."""
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=500, detail="ADMIN_PASSWORD not configured in environment")
+    if req.username != ADMIN_USERNAME or req.password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = _make_token(req.username)
+    return {"token": token, "username": req.username}
+
+
+@app.get("/api/admin/verify-token")
+def verify_token(admin: str = Depends(require_admin)):
+    """Check if the current token is still valid."""
+    return {"valid": True, "username": admin}
+
+
+@app.middleware("http")
+async def admin_auth_middleware(request: Request, call_next):
+    """Protect all /api/admin/* endpoints except /api/admin/login."""
+    path = request.url.path
+    if path.startswith("/api/admin/") and path != "/api/admin/login":
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return Response(
+                content=_json.dumps({"detail": "Authentication required"}),
+                status_code=401,
+                media_type="application/json",
+            )
+        token = auth_header[7:]
+        username = _verify_token(token)
+        if username is None:
+            return Response(
+                content=_json.dumps({"detail": "Invalid or expired token"}),
+                status_code=401,
+                media_type="application/json",
+            )
+    return await call_next(request)
+
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -141,6 +265,12 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    # Persist response cache to disk before shutting down
+    if _chatbot is not None:
+        try:
+            _chatbot._cache.save_to_disk()
+        except Exception as e:
+            logger.warning(f"Cache persistence on shutdown failed: {e}")
     close_db()
 
 
@@ -159,13 +289,15 @@ def health():
             "db_count": bot.get_collection_count("databases"),
             "library_available": bot.library_available,
             "supported_languages": ["en", "ar"],
+            "llm_available": is_llm_available(),
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+@limiter.limit("20/minute")
+def chat(request: Request, req: ChatRequest):
     """Send a message and get a chatbot response.
 
     Language is always auto-detected from the message text on a per-message
@@ -175,7 +307,12 @@ def chat(req: ChatRequest):
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    bot = get_chatbot()
+    try:
+        bot = get_chatbot()
+    except Exception as e:
+        logger.error(f"Failed to initialize chatbot: {e}")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable. Please try again shortly.")
+
     query_text = req.message.strip()
 
     start_time = time.time()
@@ -237,6 +374,47 @@ def chat(req: ChatRequest):
     )
 
 
+@app.post("/api/feedback")
+@limiter.limit("30/minute")
+def public_feedback(request: Request, req: FeedbackRequest):
+    """Public feedback endpoint for user thumbs-up/down from the chat UI.
+
+    Mirrors /api/admin/feedback but does not require authentication.
+    Forces source='user' to distinguish from admin feedback.
+    """
+    try:
+        from .embeddings import embed_text as _embed
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT query FROM chat_conversations WHERE id = %s", (req.conversation_id,))
+                conv_row = cur.fetchone()
+                if not conv_row:
+                    raise HTTPException(status_code=404, detail="Conversation not found")
+
+                embedding = None
+                try:
+                    embedding = _embed(conv_row[0])
+                except Exception:
+                    pass
+
+                cur.execute(
+                    """INSERT INTO chat_feedback
+                       (conversation_id, rating, corrected_answer, comment, embedding, feedback_source)
+                       VALUES (%s, %s, %s, %s, %s, 'user') RETURNING id""",
+                    (req.conversation_id, req.rating,
+                     req.corrected_answer.strip() if req.corrected_answer else None,
+                     req.comment.strip() if req.comment else None,
+                     embedding),
+                )
+                feedback_id = cur.fetchone()[0]
+            conn.commit()
+        return {"feedback_id": feedback_id, "status": "saved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/status")
 def status():
     """Check if indices exist."""
@@ -284,7 +462,9 @@ def admin_add_faq(req: FAQRequest):
         raise HTTPException(status_code=400, detail="Question and answer are required.")
     try:
         mgr = get_admin_manager()
-        return mgr.add_faq(req.question.strip(), req.answer.strip())
+        result = mgr.add_faq(req.question.strip(), req.answer.strip())
+        _invalidate_cache_after_edit()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -298,7 +478,9 @@ def admin_update_faq(entry_id: str, req: FAQRequest):
         raise HTTPException(status_code=400, detail="Question and answer are required.")
     try:
         mgr = get_admin_manager()
-        return mgr.update_faq(entry_id, req.question.strip(), req.answer.strip())
+        result = mgr.update_faq(entry_id, req.question.strip(), req.answer.strip())
+        _invalidate_cache_after_edit()
+        return result
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -312,7 +494,9 @@ def admin_delete_faq(entry_id: str):
     """Delete an FAQ entry."""
     try:
         mgr = get_admin_manager()
-        return mgr.delete_faq(entry_id)
+        result = mgr.delete_faq(entry_id)
+        _invalidate_cache_after_edit()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -330,7 +514,9 @@ def admin_add_database(req: DatabaseRequest):
         raise HTTPException(status_code=400, detail="Name and description are required.")
     try:
         mgr = get_admin_manager()
-        return mgr.add_database(req.name.strip(), req.description.strip())
+        result = mgr.add_database(req.name.strip(), req.description.strip())
+        _invalidate_cache_after_edit()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -344,7 +530,9 @@ def admin_update_database(entry_id: str, req: DatabaseRequest):
         raise HTTPException(status_code=400, detail="Name and description are required.")
     try:
         mgr = get_admin_manager()
-        return mgr.update_database(entry_id, req.name.strip(), req.description.strip())
+        result = mgr.update_database(entry_id, req.name.strip(), req.description.strip())
+        _invalidate_cache_after_edit()
+        return result
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -358,7 +546,9 @@ def admin_delete_database(entry_id: str):
     """Delete a database entry."""
     try:
         mgr = get_admin_manager()
-        return mgr.delete_database(entry_id)
+        result = mgr.delete_database(entry_id)
+        _invalidate_cache_after_edit()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -376,7 +566,9 @@ def admin_add_custom_note(req: CustomNoteRequest):
         raise HTTPException(status_code=400, detail="Label and content are required.")
     try:
         mgr = get_admin_manager()
-        return mgr.add_custom_note(req.label.strip(), req.content.strip())
+        result = mgr.add_custom_note(req.label.strip(), req.content.strip())
+        _invalidate_cache_after_edit()
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -388,7 +580,9 @@ def admin_update_custom_note(entry_id: str, req: CustomNoteRequest):
         raise HTTPException(status_code=400, detail="Label and content are required.")
     try:
         mgr = get_admin_manager()
-        return mgr.update_custom_note(entry_id, req.label.strip(), req.content.strip())
+        result = mgr.update_custom_note(entry_id, req.label.strip(), req.content.strip())
+        _invalidate_cache_after_edit()
+        return result
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -400,7 +594,9 @@ def admin_delete_custom_note(entry_id: str):
     """Delete a custom note entry."""
     try:
         mgr = get_admin_manager()
-        return mgr.delete_custom_note(entry_id)
+        result = mgr.delete_custom_note(entry_id)
+        _invalidate_cache_after_edit()
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -459,6 +655,7 @@ def admin_delete_document_chunk(entry_id: str):
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM document_chunks WHERE id = %s", (entry_id,))
             conn.commit()
+        _invalidate_cache_after_edit()
         return {"id": entry_id, "deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -469,7 +666,9 @@ def admin_delete_library_page(entry_id: str):
     """Delete a library page entry."""
     try:
         mgr = get_admin_manager()
-        return mgr.delete_library_page(entry_id)
+        result = mgr.delete_library_page(entry_id)
+        _invalidate_cache_after_edit()
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -675,6 +874,81 @@ def admin_rescrape():
 def admin_rescrape_status():
     """Check the status of a running or completed scrape."""
     return _scrape_status
+
+
+# ---------------------------------------------------------------------------
+# Freshness check endpoint
+# ---------------------------------------------------------------------------
+
+_freshness_status = {
+    "last_check": None,
+    "last_report": None,
+    "auto_check_enabled": True,
+    "check_interval_hours": 168,  # weekly
+}
+
+
+@app.post("/api/admin/freshness-check")
+def admin_freshness_check(dry_run: bool = False):
+    """Run a content freshness check against the live AUB website.
+
+    Compares stored chunks against live page content. If significant drift
+    is detected (>20% of sampled pages changed), triggers an automatic rescrape.
+    """
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
+        from freshness_check import check_freshness
+
+        report = check_freshness(dry_run=dry_run)
+        _freshness_status["last_check"] = report.get("checked_at")
+        _freshness_status["last_report"] = report
+        return report
+    except Exception as e:
+        logger.error(f"Freshness check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/freshness-status")
+def admin_freshness_status():
+    """Return the last freshness check result and scheduler status."""
+    return _freshness_status
+
+
+def _run_scheduled_freshness_check():
+    """Background thread: runs a freshness check at the configured interval."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
+
+    interval = _freshness_status["check_interval_hours"] * 3600
+
+    # Wait for initial startup to complete before first check
+    time.sleep(60)
+
+    while True:
+        if not _freshness_status["auto_check_enabled"]:
+            time.sleep(3600)  # Check enablement hourly
+            continue
+
+        try:
+            from freshness_check import check_freshness
+            logger.info("Running scheduled freshness check...")
+            report = check_freshness(dry_run=False)
+            _freshness_status["last_check"] = report.get("checked_at")
+            _freshness_status["last_report"] = report
+            logger.info(
+                f"Scheduled freshness check complete: "
+                f"drift={report['drift_ratio']:.1%}, action={report['action_taken']}"
+            )
+        except Exception as e:
+            logger.error(f"Scheduled freshness check failed: {e}")
+
+        time.sleep(interval)
+
+
+# Start the freshness scheduler on app startup
+_freshness_thread = threading.Thread(target=_run_scheduled_freshness_check, daemon=True)
+_freshness_thread.start()
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1272,101 @@ def evaluate_single_question(req: SingleEvalRequest):
         return result
     except Exception as e:
         logger.error(f"Single evaluation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Escalation endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/escalate")
+@limiter.limit("5/minute")
+def create_escalation(request: Request, req: EscalationRequest):
+    """Submit an escalation request (student-facing).
+
+    Creates a pending escalation that appears in the admin Escalations tab.
+    """
+    if not req.student_email.strip() or not req.question.strip():
+        raise HTTPException(status_code=400, detail="Email and question are required.")
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO escalations (student_email, student_name, question)
+                       VALUES (%s, %s, %s) RETURNING id""",
+                    (req.student_email.strip(), (req.student_name or "").strip(), req.question.strip()),
+                )
+                esc_id = cur.fetchone()[0]
+            conn.commit()
+        logger.info(f"Escalation #{esc_id} created from {req.student_email}")
+        return {"id": esc_id, "status": "pending", "message": "Your question has been sent to a librarian."}
+    except Exception as e:
+        logger.error(f"Failed to create escalation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/escalations")
+def list_escalations(status_filter: Optional[str] = None, offset: int = 0, limit: int = 30):
+    """List escalation requests (admin-facing)."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                where = ""
+                params = []
+                if status_filter and status_filter in ("pending", "answered", "closed"):
+                    where = "WHERE status = %s"
+                    params.append(status_filter)
+
+                cur.execute(
+                    f"""SELECT id, student_email, student_name, question, status,
+                               admin_response, response_sent_at, created_at
+                        FROM escalations {where}
+                        ORDER BY
+                            CASE status WHEN 'pending' THEN 0 WHEN 'answered' THEN 1 ELSE 2 END,
+                            created_at DESC
+                        LIMIT %s OFFSET %s""",
+                    params + [limit, offset],
+                )
+                rows = cur.fetchall()
+                columns = [desc[0] for desc in cur.description]
+
+                # Get total count
+                cur.execute(f"SELECT COUNT(*) FROM escalations {where}", params)
+                total = cur.fetchone()[0]
+
+                # Get pending count
+                cur.execute("SELECT COUNT(*) FROM escalations WHERE status = 'pending'")
+                pending_count = cur.fetchone()[0]
+
+        escalations = [dict(zip(columns, row)) for row in rows]
+        # Serialize datetimes
+        for esc in escalations:
+            for key in ("created_at", "response_sent_at"):
+                if esc.get(key):
+                    esc[key] = esc[key].isoformat()
+
+        return {"escalations": escalations, "total": total, "pending_count": pending_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.delete("/api/admin/escalations/{escalation_id}")
+def delete_escalation(escalation_id: int):
+    """Delete an escalation."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM escalations WHERE id = %s RETURNING id", (escalation_id,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Escalation not found.")
+            conn.commit()
+        return {"status": "deleted", "id": escalation_id}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 

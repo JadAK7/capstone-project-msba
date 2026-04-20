@@ -3,12 +3,13 @@ grounding.py — Pre-generation grounding checks and claim-level verification.
 
 This module implements the high-precision anti-hallucination pipeline:
 
-1. Answerability classifier (FULL / PARTIAL / NONE) — replaces binary YES/NO
-2. Evidence planner — extracts supportable claims BEFORE generation
-3. Claim-level post-generation audit — splits answer into atomic claims
-   and verifies each individually
-4. Query risk classifier — detects high-risk query types that need
+1. Query risk classifier — detects high-risk query types that need
    stricter evidence thresholds
+2. Answerability classifier (FULL / PARTIAL / NONE) — replaces binary YES/NO
+3. Evidence planner — extracts supportable claims BEFORE generation
+4. Generate-with-inline-verification — generates an answer constrained by
+   the evidence plan and verifies each claim inline in a single LLM call
+   (replaces the previous separate generation + post-generation audit)
 
 The key insight: hallucination happens when the model generates claims
 that have no direct textual support.  The fix is to make "no support → no claim"
@@ -21,18 +22,9 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple
 
-from openai import OpenAI
+from .llm_client import chat_completion, LLMUnavailableError
 
 logger = logging.getLogger(__name__)
-
-_client: Optional[OpenAI] = None
-
-
-def _get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    return _client
 
 
 # ============================================================================
@@ -86,8 +78,6 @@ def classify_answerability(
       NONE    → abstain entirely
     """
     try:
-        client = _get_client()
-
         # For high-risk queries, the bar for FULL is higher
         risk_note = ""
         if risk_level == "high":
@@ -98,8 +88,7 @@ def classify_answerability(
                 "If the context only has general or outdated information, classify as PARTIAL or NONE."
             )
 
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        raw = chat_completion(
             messages=[
                 {
                     "role": "system",
@@ -132,11 +121,8 @@ def classify_answerability(
                     "content": f"Question: {query}\n\nContext:\n{context[:5000]}",
                 },
             ],
-            temperature=0.0,
             max_tokens=250,
         )
-
-        raw = resp.choices[0].message.content.strip()
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
@@ -177,9 +163,7 @@ def plan_evidence(query: str, context: str) -> Dict:
     a claim unless it first identifies the supporting text.
     """
     try:
-        client = _get_client()
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        raw = chat_completion(
             messages=[
                 {
                     "role": "system",
@@ -211,11 +195,8 @@ def plan_evidence(query: str, context: str) -> Dict:
                     "content": f"Question: {query}\n\nContext:\n{context[:6000]}",
                 },
             ],
-            temperature=0.0,
             max_tokens=1000,
         )
-
-        raw = resp.choices[0].message.content.strip()
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
@@ -231,106 +212,154 @@ def plan_evidence(query: str, context: str) -> Dict:
 
 
 # ============================================================================
-# 4. Claim-level post-generation audit
+# 4. Generate-with-inline-verification (replaces separate generation + audit)
 # ============================================================================
 
-def audit_claims(
-    answer: str, context: str, lang: str = "en"
-) -> Tuple[str, List[str]]:
-    """Split answer into atomic claims and verify each one individually.
+def generate_and_verify(
+    query: str,
+    context: str,
+    evidence_plan: Dict,
+    system_prompt: str,
+    lang: str = "en",
+    partial_context: bool = False,
+    history_msgs: Optional[List[dict]] = None,
+) -> Tuple[str, str, List[str]]:
+    """Generate an answer and verify each claim inline in a single LLM call.
 
-    Unlike the previous verifier which checked the whole answer at once,
-    this audits EACH claim separately so subtle hallucinations in otherwise
-    correct answers are caught.
+    Merges the previous separate generation and claim audit steps. The LLM
+    generates the answer while simultaneously verifying each claim against
+    the context, returning structured JSON with the final answer and any
+    removed claims.
 
-    Returns (cleaned_answer, removed_claims).
+    Returns (final_answer, draft_answer, removed_claims).
     """
-    if not answer or not context:
-        return answer, []
+    planned_claims = evidence_plan.get("claims", [])
+    unsupported_aspects = evidence_plan.get("unsupported_aspects", [])
 
-    try:
-        client = _get_client()
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You audit a chatbot answer for unsupported claims.\n\n"
-                        "Process:\n"
-                        "1. Split the answer into ATOMIC claims (each individual fact).\n"
-                        "2. For EACH claim, search the context for the specific supporting text.\n"
-                        "3. Mark each claim as SUPPORTED or UNSUPPORTED.\n"
-                        "4. Rewrite the answer keeping ONLY supported claims.\n\n"
-                        "STRICT rules for marking UNSUPPORTED:\n"
-                        "- Any number, time, date, email, phone, URL, price, or name that does "
-                        "not appear verbatim in the context → UNSUPPORTED\n"
-                        "- Any service, policy, or capability not explicitly described → UNSUPPORTED\n"
-                        "- Any conclusion from combining two separate context passages → UNSUPPORTED\n"
-                        "- Any generalization (typically, usually, most, often) → UNSUPPORTED\n"
-                        "- Any claim about what a service does NOT offer (unless context explicitly "
-                        "says it's unavailable) → UNSUPPORTED\n\n"
-                        "Return ONLY a JSON object:\n"
-                        "{\n"
-                        '  "audit": [\n'
-                        '    {"claim": "...", "verdict": "SUPPORTED|UNSUPPORTED", '
-                        '"evidence": "exact quote or null"}\n'
-                        "  ],\n"
-                        '  "cleaned_answer": "answer with only supported claims, properly formatted",\n'
-                        '  "removed_claims": ["list of removed unsupported claims"]\n'
-                        "}\n\n"
-                        "If removing claims leaves the answer empty, set cleaned_answer to:\n"
-                        '"I could not verify this information from the available sources. '
-                        'Please contact the library directly."\n\n'
-                        "Preserve markdown formatting and citations in cleaned_answer."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Context:\n{context[:6000]}\n\n"
-                        f"Answer to audit:\n{answer}"
-                    ),
-                },
-            ],
-            temperature=0.0,
-            max_tokens=1200,
+    evidence_section = "=== PRE-VERIFIED EVIDENCE (use ONLY these facts) ===\n"
+    for i, claim in enumerate(planned_claims):
+        evidence_section += (
+            f"{i+1}. Claim: {claim.get('claim', '')}\n"
+            f"   Evidence: \"{claim.get('evidence', '')}\"\n"
+            f"   Source: {claim.get('source', 'unknown')}\n"
         )
 
-        raw = resp.choices[0].message.content.strip()
+    if unsupported_aspects:
+        evidence_section += (
+            "\n=== UNSUPPORTED ASPECTS (you MUST say you don't have info) ===\n"
+            + "\n".join(f"- {asp}" for asp in unsupported_aspects)
+        )
+
+    partial_note = ""
+    if partial_context:
+        partial_note = (
+            "\n\n⚠️ PARTIAL CONTEXT: Only some aspects of the question are supported. "
+            "You MUST:\n"
+            "- State ONLY the supported facts listed above\n"
+            "- Explicitly say what information is missing\n"
+            "- Do NOT fill in gaps with general knowledge\n"
+        )
+
+    verification_instructions = (
+        "\n\n=== INLINE VERIFICATION (MANDATORY) ===\n"
+        "After writing your answer, you MUST verify it. Return ONLY a JSON object:\n"
+        "{\n"
+        '  "answer": "your complete markdown-formatted answer with citations",\n'
+        '  "claims": [\n'
+        '    {"claim": "atomic fact from your answer", "evidence": "exact quote from context", "supported": true},\n'
+        '    {"claim": "atomic fact from your answer", "evidence": null, "supported": false}\n'
+        "  ],\n"
+        '  "removed_claims": ["list of claims you found unsupported and excluded from the answer"]\n'
+        "}\n\n"
+        "STRICT verification rules:\n"
+        "- Any number, time, date, email, phone, URL, price, or name MUST appear verbatim in context\n"
+        "- Any service, policy, or capability MUST be explicitly described in context\n"
+        "- Do NOT combine facts from different passages to create new claims\n"
+        "- Do NOT use generalizations (typically, usually, most, often)\n"
+        "- Do NOT claim what a service does NOT offer unless context explicitly says so\n"
+        "- If a claim is unsupported, EXCLUDE it from the answer field\n"
+        "- If excluding unsupported claims leaves the answer empty, set answer to: "
+        '"I could not verify this information from the available sources. '
+        'Please contact the library directly."'
+    )
+
+    messages = [{"role": "system", "content": system_prompt + partial_note}]
+    if history_msgs:
+        messages.extend(history_msgs)
+    messages.append({
+        "role": "user",
+        "content": (
+            f"{evidence_section}\n\n"
+            f"Context:\n{context[:6000]}\n\n"
+            f"Question: {query}\n\n"
+            "Write a response using ONLY the pre-verified evidence above. "
+            "For any unsupported aspect, explicitly state you don't have that information. "
+            "Cite sources for every claim."
+            f"{verification_instructions}"
+        ),
+    })
+
+    try:
+        raw = chat_completion(
+            messages=messages,
+            max_tokens=1200,
+            top_p=0.85,
+        )
+
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if json_match:
             result = json.loads(json_match.group())
-            cleaned = result.get("cleaned_answer", answer)
+            answer = result.get("answer", "")
+            claims = result.get("claims", [])
             removed = result.get("removed_claims", [])
 
-            # If the audit stripped everything meaningful, use abstention
-            if cleaned and len(cleaned.strip()) < 30:
+            # Build draft from all claims (including removed) for logging
+            all_claim_texts = [c.get("claim", "") for c in claims]
+            draft = answer  # The answer in JSON is already the "cleaned" version
+
+            # If the LLM stripped everything meaningful, use abstention
+            if not answer or len(answer.strip()) < 30:
                 if lang == "ar":
-                    cleaned = (
+                    answer = (
                         "لم أتمكن من التحقق من هذه المعلومات من المصادر المتاحة. "
                         "يرجى التواصل مع المكتبة مباشرة."
                     )
                 else:
-                    cleaned = (
+                    answer = (
                         "I could not verify this information from the available sources. "
                         "Please contact the library directly."
                     )
 
             if removed:
                 logger.info(
-                    f"Claim audit removed {len(removed)} claims: "
+                    f"Inline verification removed {len(removed)} claims: "
                     f"{[c[:60] for c in removed]}"
                 )
 
-            return cleaned, removed
+            return answer, draft, removed
 
+        # JSON parse failed — treat the raw text as a plain answer with disclaimer
+        logger.warning("Generate-and-verify: failed to parse JSON, using raw text")
+        return (
+            raw + "\n\n*Please verify this information with the library directly.*",
+            raw,
+            ["PARSE_ERROR: inline verification JSON not parseable"],
+        )
+
+    except LLMUnavailableError:
+        raise  # Let caller handle circuit breaker
     except Exception as e:
-        logger.warning(f"Claim audit failed: {e}")
-
-    # Fail-safe: return answer with disclaimer
-    return answer + "\n\n*Please verify this information with the library directly.*", \
-           ["AUDIT_ERROR: claim audit failed"]
+        logger.error(f"Generate-and-verify failed: {e}")
+        # Fail-safe: construct answer directly from evidence plan
+        parts = []
+        for c in planned_claims[:5]:
+            parts.append(f"- {c.get('claim', '')} {c.get('source', '')}")
+        fallback = "\n".join(parts) if parts else "An error occurred."
+        return (
+            fallback + "\n\n*Please verify this information with the library directly.*",
+            fallback,
+            ["GENERATION_ERROR: generate-and-verify failed"],
+        )
 
 
 # ============================================================================

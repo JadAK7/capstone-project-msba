@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import rehypeSanitize from 'rehype-sanitize';
 import DebugPanel from './DebugPanel';
 import { useLanguage } from '../LanguageContext';
 import { t } from '../i18n';
@@ -60,7 +61,7 @@ function MessageBubble({ message, onFeedback }) {
           {isUser ? t(language, 'roleUser') : t(language, 'roleAssistant')}
         </div>
         <div className="message-content" dir="auto">
-          <ReactMarkdown>{message.content}</ReactMarkdown>
+          <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown>
         </div>
 
         {/* Feedback buttons — hidden once feedback is given */}

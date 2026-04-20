@@ -5,7 +5,7 @@ import Footer from './components/Footer';
 import ChatWindow from './components/ChatWindow';
 import ChatInput from './components/ChatInput';
 import AdminDashboard from './pages/AdminDashboard';
-import { sendMessage, checkHealth, submitFeedback } from './api';
+import { sendMessage, checkHealth, submitPublicFeedback } from './api';
 import { LanguageProvider, useLanguage } from './LanguageContext';
 import { t } from './i18n';
 
@@ -71,11 +71,21 @@ function ChatPage() {
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err) {
-      setError(err.message);
+      let userMsg;
+      if (err.message === 'TIMEOUT') {
+        userMsg = 'The request timed out. The server may be busy — please try again.';
+      } else if (err.message === 'SERVICE_UNAVAILABLE') {
+        userMsg = 'The service is temporarily unavailable. Please try again in a moment.';
+      } else {
+        userMsg = `Sorry, I encountered an error. Please try again.`;
+      }
+      setError(userMsg);
       const errorMessage = {
         role: 'assistant',
-        content: `Sorry, I encountered an error: ${err.message}. Please try again.`,
+        content: userMsg,
         detectedLanguage: 'en',
+        isError: true,
+        retryMessage: message,
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
@@ -87,12 +97,10 @@ function ChatPage() {
     const msg = messages[messageIndex];
     if (!msg || !msg.conversationId) return;
     try {
-      await submitFeedback(
+      await submitPublicFeedback(
         msg.conversationId,
         rating,
-        null,
         userComment || null,
-        'user',
       );
       setMessages((prev) =>
         prev.map((m, i) => i === messageIndex ? { ...m, feedbackGiven: rating } : m)

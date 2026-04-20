@@ -2,6 +2,10 @@ import React, { useState, useEffect, useCallback } from 'react';
 import Header from '../components/Header';
 import Footer from '../components/Footer';
 import {
+  adminLogin,
+  verifyAdminToken,
+  adminLogout,
+  getStoredToken,
   getCollections,
   getCollectionEntries,
   addFAQ,
@@ -31,6 +35,8 @@ import {
   submitFeedback,
   getFeedbackStats,
   deleteAllFeedback,
+  getEscalations,
+  deleteEscalation,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -1351,16 +1357,262 @@ function ConversationsTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Escalations Tab
+// ---------------------------------------------------------------------------
+function EscalationsTab() {
+  const [escalations, setEscalations] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [offset, setOffset] = useState(0);
+  const [toast, setToast] = useState(null);
+  const LIMIT = 20;
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await getEscalations(null, offset, LIMIT);
+      setEscalations(data.escalations || []);
+      setTotal(data.total || 0);
+      setPendingCount(data.pending_count || 0);
+    } catch (err) {
+      setToast({ message: `Failed to load escalations: ${err.message}`, type: 'error' });
+    } finally {
+      setLoading(false);
+    }
+  }, [offset]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const handleDelete = async (escalationId) => {
+    if (!window.confirm('Delete this escalation permanently?')) return;
+    try {
+      await deleteEscalation(escalationId);
+      setToast({ message: 'Escalation deleted.', type: 'success' });
+      loadData();
+    } catch (err) {
+      setToast({ message: `Failed to delete: ${err.message}`, type: 'error' });
+    }
+  };
+
+  return (
+    <div className="admin-section">
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+
+      <div style={{
+        backgroundColor: '#fff8e1',
+        border: '1px solid #ffe0b2',
+        borderLeft: '4px solid #e65100',
+        padding: '12px 16px',
+        borderRadius: '6px',
+        marginBottom: '1.5rem',
+        fontSize: '0.9rem',
+        color: '#333',
+      }}>
+        These are questions students have asked to be forwarded to a librarian. Please respond to them directly via email.
+      </div>
+
+      <div className="admin-cards-row" style={{ marginBottom: '1.5rem' }}>
+        <div className="admin-card">
+          <div className="admin-card-value">{total}</div>
+          <div className="admin-card-label">Total Escalations</div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+        <button className="admin-btn admin-btn-secondary" onClick={loadData} disabled={loading}>
+          Refresh
+        </button>
+      </div>
+
+      {loading ? (
+        <p>Loading escalations...</p>
+      ) : escalations.length === 0 ? (
+        <p style={{ color: '#666' }}>No escalations found.</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          {escalations.map((esc) => (
+            <div key={esc.id} style={{
+              backgroundColor: '#fff',
+              border: '1px solid #e0e0e0',
+              borderRadius: '8px',
+              padding: '16px',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+                <div style={{ fontSize: '0.8rem', color: '#666' }}>
+                  {new Date(esc.created_at).toLocaleString()}
+                </div>
+                <button
+                  className="admin-btn admin-btn-danger"
+                  style={{ fontSize: '0.75rem', padding: '2px 8px' }}
+                  onClick={() => handleDelete(esc.id)}
+                >
+                  Delete
+                </button>
+              </div>
+
+              <div style={{ marginBottom: '12px' }}>
+                <div style={{ fontWeight: 600, marginBottom: '4px', color: '#333' }}>Question:</div>
+                <p style={{ margin: 0, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{esc.question}</p>
+              </div>
+
+              <div style={{
+                backgroundColor: '#f5f0f1',
+                borderLeft: '4px solid #840132',
+                padding: '12px',
+                borderRadius: '4px',
+              }}>
+                <div style={{ fontWeight: 600, color: '#840132', marginBottom: '6px' }}>
+                  Please reply to this student via email:
+                </div>
+                <div style={{ fontSize: '0.95rem' }}>
+                  {esc.student_name && <div style={{ marginBottom: '2px' }}><strong>Name:</strong> {esc.student_name}</div>}
+                  <div>
+                    <strong>Email:</strong>{' '}
+                    <a href={`mailto:${esc.student_email}?subject=Re: Your question to the AUB Library&body=Hi ${esc.student_name || 'there'},%0A%0ARegarding your question:%0A"${encodeURIComponent(esc.question)}"%0A%0A`}
+                       style={{ color: '#840132', fontWeight: 600, fontSize: '1rem' }}>
+                      {esc.student_email}
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {total > LIMIT && (
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', marginTop: '1rem' }}>
+          <button
+            className="admin-btn admin-btn-secondary"
+            disabled={offset === 0}
+            onClick={() => setOffset(Math.max(0, offset - LIMIT))}
+          >
+            Previous
+          </button>
+          <span style={{ lineHeight: '2.2rem', color: '#666' }}>
+            {offset + 1}–{Math.min(offset + LIMIT, total)} of {total}
+          </span>
+          <button
+            className="admin-btn admin-btn-secondary"
+            disabled={offset + LIMIT >= total}
+            onClick={() => setOffset(offset + LIMIT)}
+          >
+            Next
+          </button>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 
 // Evaluation UI removed. Use backend API: POST /api/admin/evaluation/run
 
 // Main Admin Dashboard
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Login screen
+// ---------------------------------------------------------------------------
+function AdminLogin({ onLogin }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!username.trim() || !password) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await adminLogin(username.trim(), password);
+      onLogin();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="app-container admin-page" dir="ltr" lang="en">
+      <Header />
+      <div className="admin-login-wrapper">
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <h2 className="admin-login-title">Admin Login</h2>
+          <label className="escalation-label">
+            Username
+            <input
+              type="text"
+              className="escalation-input"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus
+            />
+          </label>
+          <label className="escalation-label">
+            Password
+            <input
+              type="password"
+              className="escalation-input"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
+          {error && <div className="escalation-error">{error}</div>}
+          <button
+            type="submit"
+            className="escalation-btn escalation-btn-primary"
+            style={{ width: '100%', marginTop: '8px' }}
+            disabled={loading || !username.trim() || !password}
+          >
+            {loading ? 'Signing in...' : 'Sign In'}
+          </button>
+        </form>
+      </div>
+      <Footer />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Admin Dashboard
+// ---------------------------------------------------------------------------
 function AdminDashboard() {
+  const [authenticated, setAuthenticated] = useState(!!getStoredToken());
+  const [checking, setChecking] = useState(true);
   const [activeTab, setActiveTab] = useState('status');
   const [scraping, setScraping] = useState(false);
   const [scrapeMessage, setScrapeMessage] = useState('');
+
+  // Verify stored token on mount
+  useEffect(() => {
+    if (!getStoredToken()) {
+      setChecking(false);
+      return;
+    }
+    verifyAdminToken().then((valid) => {
+      setAuthenticated(valid);
+      setChecking(false);
+    });
+  }, []);
+
+  // Listen for forced logouts (401 from any admin API call)
+  useEffect(() => {
+    const handleLogout = () => setAuthenticated(false);
+    window.addEventListener('admin-logout', handleLogout);
+    return () => window.removeEventListener('admin-logout', handleLogout);
+  }, []);
+
+  const handleLogout = () => {
+    adminLogout();
+    setAuthenticated(false);
+  };
 
   const handleRescrape = useCallback(async () => {
     if (!window.confirm('This will re-scrape the AUB library website and rebuild library pages and document chunks. This may take several minutes. Continue?')) return;
@@ -1389,6 +1641,20 @@ function AdminDashboard() {
     }
   }, []);
 
+  if (checking) {
+    return (
+      <div className="app-container admin-page" dir="ltr" lang="en">
+        <Header />
+        <div className="admin-login-wrapper"><p>Verifying session...</p></div>
+        <Footer />
+      </div>
+    );
+  }
+
+  if (!authenticated) {
+    return <AdminLogin onLogin={() => setAuthenticated(true)} />;
+  }
+
   return (
     <div className="app-container admin-page" dir="ltr" lang="en">
       <Header />
@@ -1396,6 +1662,9 @@ function AdminDashboard() {
       <div className="admin-dashboard">
         <div className="admin-header">
           <h2 className="admin-title">Admin Dashboard</h2>
+          <button className="admin-btn admin-btn-secondary admin-logout-btn" onClick={handleLogout}>
+            Logout
+          </button>
         </div>
 
         <div className="admin-tabs">
@@ -1423,12 +1692,19 @@ function AdminDashboard() {
           >
             Conversations
           </button>
+          <button
+            className={`admin-tab ${activeTab === 'escalations' ? 'active' : ''}`}
+            onClick={() => setActiveTab('escalations')}
+          >
+            Escalations
+          </button>
         </div>
 
         {activeTab === 'status' && <SystemStatusTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
         {activeTab === 'data' && <DataManagementTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
         {activeTab === 'analytics' && <AnalyticsTab />}
         {activeTab === 'conversations' && <ConversationsTab />}
+        {activeTab === 'escalations' && <EscalationsTab />}
       </div>
 
       <Footer />
