@@ -247,6 +247,39 @@ export async function deleteCustomNote(id) {
 }
 
 // ---------------------------------------------------------------------------
+// Admin API -- Word Documents
+// ---------------------------------------------------------------------------
+
+export async function uploadDocument(file) {
+  const token = getStoredToken();
+  const formData = new FormData();
+  formData.append('file', file);
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await adminFetch(`${API_BASE}/api/admin/documents/upload`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+  if (!res.ok) { const e = await res.text(); throw new Error(`Failed to upload document: ${res.status} - ${e}`); }
+  return res.json();
+}
+
+export async function getDocuments() {
+  const res = await adminFetch(`${API_BASE}/api/admin/documents`, { headers: adminHeadersNoBody() });
+  if (!res.ok) throw new Error(`Failed to fetch documents: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteDocument(id) {
+  const res = await adminFetch(`${API_BASE}/api/admin/documents/${id}`, {
+    method: 'DELETE', headers: adminHeadersNoBody(),
+  });
+  if (!res.ok) { const e = await res.text(); throw new Error(`Failed to delete document: ${res.status} - ${e}`); }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Admin API -- Library Pages
 // ---------------------------------------------------------------------------
 
