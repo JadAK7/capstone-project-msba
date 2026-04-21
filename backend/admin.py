@@ -477,6 +477,47 @@ class AdminManager:
         return {"id": entry_id, "deleted": True}
 
     # ------------------------------------------------------------------
+    # Word Documents (stored in custom_notes with [DOC] label prefix)
+    #
+    # Uploaded .docx files are parsed to plain text, then chunked and
+    # embedded exactly like custom notes.  The label is always prefixed
+    # with "[DOC] " so they can be filtered separately in the admin UI.
+    # ------------------------------------------------------------------
+
+    _DOC_PREFIX = "[DOC] "
+
+    def upload_document(self, filename: str, content: str) -> dict:
+        """Store a parsed Word document as a custom note with [DOC] prefix."""
+        label = f"{self._DOC_PREFIX}{filename}"
+        return self.add_custom_note(label, content)
+
+    def list_documents(self) -> list:
+        """Return all uploaded documents (base rows only, no chunk rows)."""
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, label, content, created_at FROM custom_notes "
+                    "WHERE label LIKE %s AND id NOT LIKE %s "
+                    "ORDER BY created_at DESC",
+                    (f"{self._DOC_PREFIX}%", "%\\_c%"),
+                )
+                rows = cur.fetchall()
+        return [
+            {
+                "id": row[0],
+                "filename": row[1][len(self._DOC_PREFIX):],
+                "label": row[1],
+                "preview": row[2][:200] if row[2] else "",
+                "created_at": row[3].isoformat() if row[3] else None,
+            }
+            for row in rows
+        ]
+
+    def delete_document(self, entry_id: str) -> dict:
+        """Delete an uploaded document and all its chunks."""
+        return self.delete_custom_note(entry_id)
+
+    # ------------------------------------------------------------------
     # Library Pages (read-only + delete)
     # ------------------------------------------------------------------
 

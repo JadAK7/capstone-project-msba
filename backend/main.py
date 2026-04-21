@@ -17,7 +17,7 @@ from typing import Optional, List
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response
@@ -595,6 +595,56 @@ def admin_delete_custom_note(entry_id: str):
     try:
         mgr = get_admin_manager()
         result = mgr.delete_custom_note(entry_id)
+        _invalidate_cache_after_edit()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints -- Word Document upload/list/delete
+# ---------------------------------------------------------------------------
+
+@app.post("/api/admin/documents/upload")
+async def admin_upload_document(
+    file: UploadFile = File(...),
+    _user: str = Depends(require_admin),
+):
+    """Upload a .docx Word document, parse it, chunk it, and embed it."""
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Only .docx files are supported.")
+    try:
+        from .document_parser import parse_docx
+        raw_bytes = await file.read()
+        text = parse_docx(raw_bytes)
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Document appears to be empty or unreadable.")
+        mgr = get_admin_manager()
+        result = mgr.upload_document(file.filename, text)
+        _invalidate_cache_after_edit()
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/documents")
+def admin_list_documents(_user: str = Depends(require_admin)):
+    """List all uploaded Word documents."""
+    try:
+        mgr = get_admin_manager()
+        return {"documents": mgr.list_documents()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/documents/{entry_id}")
+def admin_delete_document(entry_id: str, _user: str = Depends(require_admin)):
+    """Delete an uploaded document and all its embedding chunks."""
+    try:
+        mgr = get_admin_manager()
+        result = mgr.delete_document(entry_id)
         _invalidate_cache_after_edit()
         return result
     except Exception as e:

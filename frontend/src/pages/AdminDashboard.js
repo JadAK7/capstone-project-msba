@@ -37,6 +37,9 @@ import {
   deleteAllFeedback,
   getEscalations,
   deleteEscalation,
+  uploadDocument,
+  getDocuments,
+  deleteDocument,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -252,9 +255,30 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
   const [formField1, setFormField1] = useState('');
   const [formField2, setFormField2] = useState('');
 
+  // Documents tab state
+  const [documents, setDocuments] = useState([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
   const LIMIT = 20;
 
+  const loadDocuments = useCallback(async () => {
+    setDocsLoading(true);
+    try {
+      const data = await getDocuments();
+      setDocuments(data.documents || []);
+    } catch (err) {
+      setToast({ message: `Failed to load documents: ${err.message}`, type: 'error' });
+    } finally {
+      setDocsLoading(false);
+    }
+  }, []);
+
   const loadEntries = useCallback(async () => {
+    if (activeCollection === 'documents') {
+      await loadDocuments();
+      return;
+    }
     setLoading(true);
     try {
       let data;
@@ -270,7 +294,7 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
     } finally {
       setLoading(false);
     }
-  }, [activeCollection, offset, chunkSearchActive, chunkSearch]);
+  }, [activeCollection, offset, chunkSearchActive, chunkSearch, loadDocuments]);
 
   useEffect(() => {
     setOffset(0);
@@ -396,20 +420,25 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
 
   const field1Label = activeCollection === 'faq' ? 'Question' : activeCollection === 'custom_notes' ? 'Label' : 'Name';
   const field2Label = activeCollection === 'faq' ? 'Answer' : activeCollection === 'custom_notes' ? 'Content' : 'Description';
-  const canEdit = activeCollection !== 'library_pages' && activeCollection !== 'document_chunks';
+  const canEdit = activeCollection !== 'library_pages' && activeCollection !== 'document_chunks' && activeCollection !== 'documents';
 
   return (
     <div className="admin-tab-content">
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
 
       <div className="admin-collection-tabs">
-        {['faq', 'databases', 'custom_notes', 'library_pages', 'document_chunks'].map((name) => (
+        {['faq', 'databases', 'custom_notes', 'documents', 'library_pages', 'document_chunks'].map((name) => (
           <button
             key={name}
             className={`admin-collection-tab ${activeCollection === name ? 'active' : ''}`}
             onClick={() => setActiveCollection(name)}
           >
-            {name === 'faq' ? 'FAQs' : name === 'databases' ? 'Databases' : name === 'custom_notes' ? 'Custom Notes' : name === 'library_pages' ? 'Library Pages' : 'Document Chunks'}
+            {name === 'faq' ? 'FAQs'
+              : name === 'databases' ? 'Databases'
+              : name === 'custom_notes' ? 'Custom Notes'
+              : name === 'documents' ? 'Documents'
+              : name === 'library_pages' ? 'Library Pages'
+              : 'Document Chunks'}
           </button>
         ))}
       </div>
@@ -499,6 +528,88 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
         </>
       )}
 
+      {activeCollection === 'documents' && (
+        <div>
+          <div className="admin-info-note">
+            Upload Word (.docx) documents to add them to the knowledge base. They will be parsed,
+            chunked, and embedded automatically — the chatbot will use them to answer questions.
+          </div>
+          <div className="admin-actions-bar" style={{ alignItems: 'center', gap: '0.75rem' }}>
+            <label className="admin-btn admin-btn-primary" style={{ cursor: 'pointer', marginBottom: 0 }}>
+              {uploading ? 'Uploading...' : 'Upload .docx'}
+              <input
+                type="file"
+                accept=".docx"
+                style={{ display: 'none' }}
+                disabled={uploading}
+                onChange={async (e) => {
+                  const file = e.target.files[0];
+                  if (!file) return;
+                  setUploading(true);
+                  try {
+                    await uploadDocument(file);
+                    setToast({ message: `"${file.name}" uploaded and indexed successfully.`, type: 'success' });
+                    await loadDocuments();
+                  } catch (err) {
+                    setToast({ message: `Upload failed: ${err.message}`, type: 'error' });
+                  } finally {
+                    setUploading(false);
+                    e.target.value = '';
+                  }
+                }}
+              />
+            </label>
+          </div>
+          {docsLoading ? (
+            <div className="admin-loading">Loading documents...</div>
+          ) : documents.length === 0 ? (
+            <div className="admin-empty">No documents uploaded yet. Upload a .docx file above.</div>
+          ) : (
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Filename</th>
+                  <th>Preview</th>
+                  <th>Uploaded</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {documents.map((doc) => (
+                  <tr key={doc.id}>
+                    <td style={{ fontWeight: 500 }}>{doc.filename}</td>
+                    <td style={{ maxWidth: '400px', color: '#555', fontSize: '0.85em' }}>
+                      {doc.preview}
+                      {doc.preview && doc.preview.length >= 200 ? '…' : ''}
+                    </td>
+                    <td style={{ whiteSpace: 'nowrap', fontSize: '0.85em' }}>
+                      {doc.created_at ? new Date(doc.created_at).toLocaleDateString() : '—'}
+                    </td>
+                    <td>
+                      <button
+                        className="admin-btn admin-btn-danger admin-btn-sm"
+                        onClick={async () => {
+                          if (!window.confirm(`Delete "${doc.filename}"? This cannot be undone.`)) return;
+                          try {
+                            await deleteDocument(doc.id);
+                            setToast({ message: `"${doc.filename}" deleted.`, type: 'success' });
+                            await loadDocuments();
+                          } catch (err) {
+                            setToast({ message: `Failed to delete: ${err.message}`, type: 'error' });
+                          }
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
       {canEdit && (
         <div className="admin-actions-bar">
           <button
@@ -536,9 +647,9 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
         </div>
       )}
 
-      {loading ? (
+      {activeCollection !== 'documents' && loading ? (
         <div className="admin-loading">Loading entries...</div>
-      ) : (
+      ) : activeCollection !== 'documents' && (
         <>
           <div className="admin-table-info">
             {chunkSearchActive && activeCollection === 'document_chunks'
