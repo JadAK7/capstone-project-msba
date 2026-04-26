@@ -28,7 +28,7 @@ except ImportError:
     print("numpy required: pip install numpy")
     sys.exit(1)
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
 def cohen_kappa(ratings_a, ratings_b, labels):
@@ -233,7 +233,7 @@ def run_agreement_eval(results_path: str, output_path: str = None) -> dict:
     if not output_path:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
             f"eval_human_agreement_{ts}.json",
         )
 

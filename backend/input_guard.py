@@ -161,7 +161,11 @@ def _get_injection_embeddings() -> Optional[np.ndarray]:
     try:
         from .embeddings import embed_texts
         embeddings = embed_texts(_CANONICAL_INJECTION_PROMPTS)
-        _injection_embeddings = np.array(embeddings, dtype=np.float32)
+        mat = np.array(embeddings, dtype=np.float32)
+        mat = np.where(np.isfinite(mat), mat, 0.0)
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        _injection_embeddings = mat / norms
         logger.info(
             f"Injection guard: loaded {len(_CANONICAL_INJECTION_PROMPTS)} "
             f"canonical injection embeddings"
@@ -186,10 +190,16 @@ def _check_injection_embedding(query: str) -> Optional[str]:
     try:
         from .embeddings import embed_text
         query_vec = np.array(embed_text(query), dtype=np.float32)
+        if not np.all(np.isfinite(query_vec)):
+            return None
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm == 0:
+            return None
+        query_vec = query_vec / query_norm
 
-        # Cosine similarity: dot product of normalized vectors
-        # Embeddings from OpenAI are already L2-normalized, so dot = cosine sim
-        similarities = injection_matrix @ query_vec
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            similarities = injection_matrix @ query_vec
+        similarities = np.where(np.isfinite(similarities), similarities, -1.0)
         max_idx = int(np.argmax(similarities))
         max_sim = float(similarities[max_idx])
 

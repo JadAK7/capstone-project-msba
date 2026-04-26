@@ -18,12 +18,13 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+# Load environment variables BEFORE importing backend modules so that
+# OPENAI_EMBEDDING_MODEL (and other env vars) are visible at import time.
+load_dotenv()
+
 from backend.cache import ResponseCache
 from backend.database import init_db, get_connection
-from backend.embeddings import embed_text
-
-# Load environment variables from .env file
-load_dotenv()
+from backend.embeddings import embed_text, EMBEDDING_MODEL as _EMBEDDING_MODEL
 
 # Configure logging
 logging.basicConfig(level=logging.WARNING)
@@ -33,7 +34,8 @@ client = OpenAI()
 
 # Configuration
 class Config:
-    EMBEDDING_MODEL = "text-embedding-3-small"
+    EMBEDDING_MODEL = _EMBEDDING_MODEL  # resolved from OPENAI_EMBEDDING_MODEL env var
+    CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini").strip()
 
     FAQ_COLLECTION = "faq"
     DB_COLLECTION = "databases"
@@ -436,7 +438,7 @@ class LibraryChatbot:
             })
 
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=Config.CHAT_MODEL,
                 messages=messages,
                 temperature=0.2,
                 max_tokens=500,
@@ -508,7 +510,7 @@ class LibraryChatbot:
         })
 
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=Config.CHAT_MODEL,
             messages=messages,
             temperature=0.2,
             max_tokens=500,
@@ -554,7 +556,7 @@ class LibraryChatbot:
         """Translate English text to Arabic using the LLM."""
         try:
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=Config.CHAT_MODEL,
                 messages=[
                     {
                         "role": "system",

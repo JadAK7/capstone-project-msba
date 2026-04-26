@@ -113,6 +113,7 @@ def verify_answer(
                     "role": "system",
                     "content": (
                         "You are a STRICT fact-checking assistant for a university library chatbot. "
+
                         "Your job is to verify that every factual claim in a draft answer is "
                         "EXPLICITLY supported by the provided context passages. "
                         "You must be aggressive about catching unsupported content — "
@@ -161,6 +162,7 @@ def verify_answer(
                 },
             ],
             max_tokens=1000,
+            call_type="verify",
         )
 
         # Parse JSON response

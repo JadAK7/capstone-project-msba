@@ -28,7 +28,7 @@ import sys
 import time
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -114,6 +114,13 @@ def _is_abstention(answer: str, debug: dict) -> bool:
         "not quite sure how to help",
         "i can only assist with library",
         "i can only answer questions about",
+        # Newer phrasings the bot uses for honest "I don't know" answers
+        # that the previous regex was missing — caused 3 honest abstentions
+        # to be classified as risky answers in the unanswerable test.
+        "does not specify",
+        "provided information does not",
+        "does not provide",
+        "no information",
         "لم أتمكن",
         "لا تتوفر",
         "يرجى التواصل",
@@ -279,7 +286,7 @@ def run_abstention_eval(api_key: str, output_path: str = None) -> dict:
     if not output_path:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
             f"eval_abstention_{ts}.json",
         )
 

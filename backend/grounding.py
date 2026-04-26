@@ -94,6 +94,7 @@ def classify_answerability(
                     "role": "system",
                     "content": (
                         "You classify whether retrieved context passages can answer a user question.\n\n"
+
                         "Respond with ONLY a JSON object:\n"
                         "{\n"
                         '  "level": "FULL" | "PARTIAL" | "NONE",\n'
@@ -122,6 +123,7 @@ def classify_answerability(
                 },
             ],
             max_tokens=250,
+            call_type="generate",
         )
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if json_match:
@@ -196,6 +198,7 @@ def plan_evidence(query: str, context: str) -> Dict:
                 },
             ],
             max_tokens=1000,
+            call_type="generate",
         )
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if json_match:
@@ -215,6 +218,87 @@ def plan_evidence(query: str, context: str) -> Dict:
 # 4. Generate-with-inline-verification (replaces separate generation + audit)
 # ============================================================================
 
+def _parse_chunk_index(chunk_id: str) -> Optional[int]:
+    """Parse 'chunk_0' → 0, 'chunk_12' → 12; return None on failure."""
+    try:
+        return int(chunk_id.split("_")[-1])
+    except (ValueError, IndexError, AttributeError):
+        return None
+
+
+def _validate_chunk_ids(claims: List[dict], n_chunks: int) -> List[str]:
+    """Return a list of invalid chunk_id strings (referencing out-of-range chunks)."""
+    invalid = []
+    for claim in claims:
+        cid = claim.get("chunk_id", "")
+        if not cid:
+            continue
+        idx = _parse_chunk_index(cid)
+        if idx is None or not (0 <= idx < n_chunks):
+            invalid.append(cid)
+    return invalid
+
+
+def _generate_answer_raw(
+    query: str,
+    context: str,
+    evidence_plan: Dict,
+    system_prompt: str,
+    lang: str,
+    partial_context: bool,
+    history_msgs: Optional[List[dict]],
+) -> str:
+    """Generation-only call (no inline verification).
+
+    Used as the first stage of the two-stage fallback when the structured
+    single-call JSON parse fails.
+    """
+    planned_claims = evidence_plan.get("claims", [])
+    unsupported_aspects = evidence_plan.get("unsupported_aspects", [])
+
+    evidence_section = "=== PRE-VERIFIED EVIDENCE (use ONLY these facts) ===\n"
+    for i, claim in enumerate(planned_claims):
+        evidence_section += (
+            f"{i+1}. Claim: {claim.get('claim', '')}\n"
+            f"   Evidence: \"{claim.get('evidence', '')}\"\n"
+            f"   Source: {claim.get('source', 'unknown')}\n"
+        )
+    if unsupported_aspects:
+        evidence_section += (
+            "\n=== UNSUPPORTED ASPECTS (say you don't have info on these) ===\n"
+            + "\n".join(f"- {asp}" for asp in unsupported_aspects)
+        )
+
+    partial_note = ""
+    if partial_context:
+        partial_note = (
+            "\n\n⚠️ PARTIAL CONTEXT: Answer only the supported parts above. "
+            "Explicitly acknowledge missing information."
+        )
+
+    messages = [{"role": "system", "content": system_prompt + partial_note}]
+    if history_msgs:
+        messages.extend(history_msgs)
+    messages.append({
+        "role": "user",
+        "content": (
+            f"{evidence_section}\n\n"
+            f"Context:\n{context[:6000]}\n\n"
+            f"Question: {query}\n\n"
+            "Write a response using ONLY the pre-verified evidence above. "
+            "Cite sources (Source: ...) for every claim. "
+            "For unsupported aspects, explicitly say you don't have that information."
+        ),
+    })
+
+    return chat_completion(
+        messages=messages,
+        max_tokens=1200,
+        top_p=0.85,
+        call_type="generate",
+    )
+
+
 def generate_and_verify(
     query: str,
     context: str,
@@ -226,15 +310,38 @@ def generate_and_verify(
 ) -> Tuple[str, str, List[str]]:
     """Generate an answer and verify each claim inline in a single LLM call.
 
-    Merges the previous separate generation and claim audit steps. The LLM
-    generates the answer while simultaneously verifying each claim against
-    the context, returning structured JSON with the final answer and any
-    removed claims.
+    The LLM returns structured JSON with:
+      - answer:   final markdown answer
+      - claims:   [{claim, chunk_id, confidence}] — chunk_id references [Chunk-N]
+      - verified: bool — LLM self-reports if all claims are grounded
+      - flags:    [] or list of issues found during self-check
+      - removed_claims: claims excluded by the LLM
+
+    Post-generation checks (Python, no extra LLM call):
+      - Regex output safety check (always runs)
+      - Local chunk_id range validation
+
+    Conditional fallback (one extra LLM call):
+      - If verified=false OR flags non-empty OR invalid chunk references
+        → call verify_answer() from verifier.py on the generated answer
+
+    Structured-output parse failure fallback:
+      - If the LLM returns unparseable JSON → fall back to two-stage behavior:
+        generate (plain text) then verify_answer() separately.
 
     Returns (final_answer, draft_answer, removed_claims).
     """
+    from .verifier import check_output_safety, verify_answer
+
     planned_claims = evidence_plan.get("claims", [])
     unsupported_aspects = evidence_plan.get("unsupported_aspects", [])
+
+    # Number context passages so the LLM can reference them by ID
+    context_parts = context.split("\n\n---\n\n")
+    n_chunks = len(context_parts)
+    numbered_context = "\n\n---\n\n".join(
+        f"[Chunk-{i}]\n{part}" for i, part in enumerate(context_parts)
+    )
 
     evidence_section = "=== PRE-VERIFIED EVIDENCE (use ONLY these facts) ===\n"
     for i, claim in enumerate(planned_claims):
@@ -262,23 +369,27 @@ def generate_and_verify(
 
     verification_instructions = (
         "\n\n=== INLINE VERIFICATION (MANDATORY) ===\n"
-        "After writing your answer, you MUST verify it. Return ONLY a JSON object:\n"
+        "After writing your answer, return ONLY a JSON object (no text outside):\n"
         "{\n"
         '  "answer": "your complete markdown-formatted answer with citations",\n'
         '  "claims": [\n'
-        '    {"claim": "atomic fact from your answer", "evidence": "exact quote from context", "supported": true},\n'
-        '    {"claim": "atomic fact from your answer", "evidence": null, "supported": false}\n'
+        '    {"claim": "atomic fact from your answer", "chunk_id": "chunk_0", "confidence": 0.95}\n'
         "  ],\n"
-        '  "removed_claims": ["list of claims you found unsupported and excluded from the answer"]\n'
+        '  "verified": true,\n'
+        '  "flags": [],\n'
+        '  "removed_claims": ["claims you excluded because they had no chunk support"]\n'
         "}\n\n"
-        "STRICT verification rules:\n"
-        "- Any number, time, date, email, phone, URL, price, or name MUST appear verbatim in context\n"
-        "- Any service, policy, or capability MUST be explicitly described in context\n"
-        "- Do NOT combine facts from different passages to create new claims\n"
-        "- Do NOT use generalizations (typically, usually, most, often)\n"
-        "- Do NOT claim what a service does NOT offer unless context explicitly says so\n"
-        "- If a claim is unsupported, EXCLUDE it from the answer field\n"
-        "- If excluding unsupported claims leaves the answer empty, set answer to: "
+        "STRICT rules:\n"
+        f"- Context passages are labelled [Chunk-0] through [Chunk-{n_chunks - 1}]\n"
+        "- In each claim, set chunk_id to the label of the passage that supports it "
+        "(e.g. 'chunk_0', 'chunk_2')\n"
+        "- If a claim has no supporting chunk, EXCLUDE it from the answer and add to removed_claims\n"
+        "- Set 'verified': false if you had to exclude any claims\n"
+        "- Set 'flags' to a non-empty list describing any issues (unsupported claims, etc.)\n"
+        "- Any number, time, date, email, URL, or name MUST appear verbatim in the chunk\n"
+        "- Do NOT combine facts from different chunks to create a new claim\n"
+        "- Do NOT use generalizations (typically, usually, generally)\n"
+        "- If ALL claims are unsupported, set answer to: "
         '"I could not verify this information from the available sources. '
         'Please contact the library directly."'
     )
@@ -290,11 +401,11 @@ def generate_and_verify(
         "role": "user",
         "content": (
             f"{evidence_section}\n\n"
-            f"Context:\n{context[:6000]}\n\n"
+            f"Context:\n{numbered_context[:6000]}\n\n"
             f"Question: {query}\n\n"
             "Write a response using ONLY the pre-verified evidence above. "
             "For any unsupported aspect, explicitly state you don't have that information. "
-            "Cite sources for every claim."
+            "Cite the Source tag for every claim."
             f"{verification_instructions}"
         ),
     })
@@ -304,56 +415,112 @@ def generate_and_verify(
             messages=messages,
             max_tokens=1200,
             top_p=0.85,
+            call_type="generate",
         )
 
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if json_match:
+        if not json_match:
+            # ---- Structured-output parse failure: two-stage fallback ----
+            logger.warning(
+                "generate_and_verify: JSON not found in LLM response; "
+                "falling back to two-stage generate→verify"
+            )
+            draft_raw = raw if (raw and len(raw) > 20) else _generate_answer_raw(
+                query, context, evidence_plan, system_prompt, lang,
+                partial_context, history_msgs,
+            )
+            final, removed = verify_answer(query, draft_raw, context, lang)
+            return final, draft_raw, removed + ["PARSE_ERROR: structured output fallback used"]
+
+        try:
             result = json.loads(json_match.group())
-            answer = result.get("answer", "")
-            claims = result.get("claims", [])
-            removed = result.get("removed_claims", [])
+        except json.JSONDecodeError:
+            logger.warning("generate_and_verify: JSON decode failed; two-stage fallback")
+            draft_raw = _generate_answer_raw(
+                query, context, evidence_plan, system_prompt, lang,
+                partial_context, history_msgs,
+            )
+            final, removed = verify_answer(query, draft_raw, context, lang)
+            return final, draft_raw, removed + ["PARSE_ERROR: JSON decode fallback used"]
 
-            # Build draft from all claims (including removed) for logging
-            all_claim_texts = [c.get("claim", "") for c in claims]
-            draft = answer  # The answer in JSON is already the "cleaned" version
+        answer = result.get("answer", "")
+        claims = result.get("claims", [])
+        verified = result.get("verified", True)
+        flags = result.get("flags", [])
+        removed = result.get("removed_claims", [])
+        draft = answer
 
-            # If the LLM stripped everything meaningful, use abstention
-            if not answer or len(answer.strip()) < 30:
-                if lang == "ar":
-                    answer = (
-                        "لم أتمكن من التحقق من هذه المعلومات من المصادر المتاحة. "
-                        "يرجى التواصل مع المكتبة مباشرة."
-                    )
-                else:
-                    answer = (
-                        "I could not verify this information from the available sources. "
-                        "Please contact the library directly."
-                    )
+        # ---- Regex safety check (always runs, no LLM) ----
+        is_safe, violation = check_output_safety(answer)
+        if not is_safe:
+            logger.warning("generate_and_verify safety violation: %s", violation)
+            if lang == "ar":
+                refusal = "يمكنني فقط الإجابة على الأسئلة المتعلقة بخدمات وموارد مكتبة الجامعة."
+            else:
+                refusal = "I can only answer questions about AUB library services and resources."
+            return refusal, draft, [f"SAFETY_VIOLATION: {violation}"]
 
-            if removed:
+        # ---- Local deterministic chunk_id validation (no LLM) ----
+        invalid_refs = _validate_chunk_ids(claims, n_chunks)
+        if invalid_refs:
+            logger.warning(
+                "generate_and_verify: chunk_ids %s are out of range (n_chunks=%d)",
+                invalid_refs,
+                n_chunks,
+            )
+
+        # ---- Conditional fallback: external verifier LLM call ----
+        # Triggered when: LLM self-reports failure, flags non-empty, or invalid chunk refs.
+        if not verified or flags or invalid_refs:
+            reason_parts = []
+            if not verified:
+                reason_parts.append("verified=false")
+            if flags:
+                reason_parts.append(f"flags={flags[:3]}")
+            if invalid_refs:
+                reason_parts.append(f"invalid_chunk_ids={invalid_refs}")
+            logger.info(
+                "generate_and_verify triggering external verifier: %s",
+                ", ".join(reason_parts),
+            )
+            verified_answer, extra_removed = verify_answer(query, answer, context, lang)
+            removed = list(removed) + extra_removed
+            if extra_removed:
                 logger.info(
-                    f"Inline verification removed {len(removed)} claims: "
-                    f"{[c[:60] for c in removed]}"
+                    "External verifier removed %d additional claims", len(extra_removed)
+                )
+            answer = verified_answer
+
+        # Abstention guard
+        if not answer or len(answer.strip()) < 30:
+            if lang == "ar":
+                answer = (
+                    "لم أتمكن من التحقق من هذه المعلومات من المصادر المتاحة. "
+                    "يرجى التواصل مع المكتبة مباشرة."
+                )
+            else:
+                answer = (
+                    "I could not verify this information from the available sources. "
+                    "Please contact the library directly."
                 )
 
-            return answer, draft, removed
+        if removed:
+            logger.info(
+                "Inline verification removed %d claim(s): %s",
+                len(removed),
+                [c[:60] for c in removed],
+            )
 
-        # JSON parse failed — treat the raw text as a plain answer with disclaimer
-        logger.warning("Generate-and-verify: failed to parse JSON, using raw text")
-        return (
-            raw + "\n\n*Please verify this information with the library directly.*",
-            raw,
-            ["PARSE_ERROR: inline verification JSON not parseable"],
-        )
+        return answer, draft, removed
 
     except LLMUnavailableError:
-        raise  # Let caller handle circuit breaker
+        raise
     except Exception as e:
-        logger.error(f"Generate-and-verify failed: {e}")
-        # Fail-safe: construct answer directly from evidence plan
-        parts = []
-        for c in planned_claims[:5]:
-            parts.append(f"- {c.get('claim', '')} {c.get('source', '')}")
+        logger.error("generate_and_verify failed: %s", e)
+        parts = [
+            f"- {c.get('claim', '')} {c.get('source', '')}"
+            for c in planned_claims[:5]
+        ]
         fallback = "\n".join(parts) if parts else "An error occurred."
         return (
             fallback + "\n\n*Please verify this information with the library directly.*",

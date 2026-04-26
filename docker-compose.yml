@@ -2,6 +2,7 @@ version: "3.8"
 
 services:
   db:
+    restart: unless-stopped
     image: pgvector/pgvector:pg16
     container_name: aub_library_db
     environment:

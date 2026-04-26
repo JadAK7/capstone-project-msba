@@ -47,6 +47,8 @@ class ChatLogger:
         guard_out_of_scope: bool = False,
         guard_refusal_reason: str = "",
         guard_matched_patterns: Optional[list] = None,
+        # Per-stage latency map (ms per stage name)
+        stage_latencies: Optional[dict] = None,
     ) -> Optional[int]:
         """Insert a log entry into chat_conversations. Returns conversation_id."""
         try:
@@ -62,7 +64,8 @@ class ChatLogger:
                             draft_answer, verified_answer, removed_claims,
                             context_sent_to_llm, verification_passed,
                             guard_injection_detected, guard_out_of_scope,
-                            guard_refusal_reason, guard_matched_patterns
+                            guard_refusal_reason, guard_matched_patterns,
+                            stage_latencies
                         ) VALUES (
                             %s, %s, %s, %s,
                             %s, %s, %s,
@@ -72,7 +75,8 @@ class ChatLogger:
                             %s, %s, %s,
                             %s, %s,
                             %s, %s,
-                            %s, %s
+                            %s, %s,
+                            %s
                         ) RETURNING id""",
                         (
                             query,
@@ -99,6 +103,7 @@ class ChatLogger:
                             guard_out_of_scope,
                             guard_refusal_reason,
                             json.dumps(guard_matched_patterns or []),
+                            json.dumps(stage_latencies or {}),
                         ),
                     )
                     row = cur.fetchone()
@@ -437,6 +442,66 @@ class AnalyticsComputer:
             else 0,
             "avg_query_word_count": round(avg_wc, 1),
         }
+
+    def latency_stats(self) -> dict:
+        """Compute mean per-stage latencies from chat_conversations.stage_latencies.
+
+        Returns:
+            {
+              "mean_latencies_ms": {"input_guards": 12.3, "query_rewriting": 450.1, ...},
+              "sample_count": 142
+            }
+        """
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT stage_latencies
+                           FROM chat_conversations
+                           WHERE stage_latencies IS NOT NULL
+                             AND stage_latencies != '{}'::jsonb"""
+                    )
+                    rows = cur.fetchall()
+
+            if not rows:
+                return {"mean_latencies_ms": {}, "sample_count": 0}
+
+            stage_totals: dict = {}
+            stage_counts: dict = {}
+
+            for (latencies,) in rows:
+                if not isinstance(latencies, dict):
+                    continue
+                for stage, ms in latencies.items():
+                    try:
+                        val = float(ms)
+                    except (TypeError, ValueError):
+                        continue
+                    stage_totals[stage] = stage_totals.get(stage, 0.0) + val
+                    stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+            mean_latencies = {
+                stage: round(stage_totals[stage] / stage_counts[stage], 1)
+                for stage in stage_totals
+                if stage_counts.get(stage, 0) > 0
+            }
+
+            # Enforce canonical stage order for display
+            _ORDER = [
+                "input_guards", "query_rewriting", "cache_lookup",
+                "feedback_correction", "intent_classification",
+                "hybrid_retrieval", "llm_reranking", "generation", "verification",
+            ]
+            ordered = {s: mean_latencies[s] for s in _ORDER if s in mean_latencies}
+            for s in mean_latencies:
+                if s not in ordered:
+                    ordered[s] = mean_latencies[s]
+
+            return {"mean_latencies_ms": ordered, "sample_count": len(rows)}
+
+        except Exception as e:
+            logger.error("Latency stats failed: %s", e)
+            return {"mean_latencies_ms": {}, "sample_count": 0}
 
     def compute_charts(self) -> dict:
         """Generate all analytics charts as base64 PNGs."""

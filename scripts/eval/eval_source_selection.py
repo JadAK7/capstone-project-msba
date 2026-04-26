@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from backend.source_config import FACULTY_TEXT, SCRAPED_WEBSITE, FACULTY_FAQ, DATABASES
 
@@ -271,6 +271,7 @@ def run_evaluation(
     categories: Optional[List[str]] = None,
     verbose: bool = False,
     dry_run: bool = False,
+    output: Optional[str] = None,
 ):
     """Run the full evaluation suite."""
     tests = TEST_CASES
@@ -295,6 +296,14 @@ def run_evaluation(
             print(f"    Expected: {t.expected_source} (also OK: {t.accept_alternatives})")
             print(f"    Reason: {t.description}")
             print()
+        if output:
+            with open(output, "w", encoding="utf-8") as f:
+                json.dump({
+                    "mode": "dry_run",
+                    "n_tests": len(tests),
+                    "tests": [{"category": t.category, "query": t.query,
+                               "expected_source": t.expected_source} for t in tests],
+                }, f, indent=2, ensure_ascii=False)
         return
 
     # Initialize chatbot
@@ -321,6 +330,30 @@ def run_evaluation(
 
     # Print summary
     _print_summary(results)
+
+    # Persist to JSON when an output path was provided
+    if output:
+        total = len(results)
+        passed = sum(1 for r in results if r.passed)
+        payload = {
+            "metadata": {"n_tests": total, "n_passed": passed,
+                         "accuracy": round(passed / total, 4) if total else 0.0},
+            "results": [
+                {
+                    "category": r.test.category,
+                    "query": r.test.query,
+                    "expected_source": r.test.expected_source,
+                    "actual_source": r.actual_source,
+                    "passed": r.passed,
+                    "score_by_source": r.score_by_source,
+                    "selection_reason": r.selection_reason,
+                    "response_time_ms": r.response_time_ms,
+                }
+                for r in results
+            ],
+        }
+        with open(output, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def _print_summary(results: List[TestResult]):
@@ -389,10 +422,13 @@ if __name__ == "__main__":
     parser.add_argument("--category", "-c", nargs="+", help="Filter by category")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
     parser.add_argument("--dry-run", "-d", action="store_true", help="Show test cases only")
+    parser.add_argument("--output", "-o", type=str, default=None,
+                        help="Write results JSON to this path")
     args = parser.parse_args()
 
     run_evaluation(
         categories=args.category,
         verbose=args.verbose,
         dry_run=args.dry_run,
+        output=args.output,
     )

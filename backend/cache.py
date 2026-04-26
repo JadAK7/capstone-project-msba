@@ -122,6 +122,22 @@ class ResponseCache:
         self._hits += 1
         return value
 
+    def get_embedding(self, key: Tuple[str, str]) -> Optional[np.ndarray]:
+        """Return the stored embedding for a key (or None if absent/expired).
+
+        Does NOT update LRU order or hit/miss counters. Used to propagate an
+        embedding from one cache key to another (e.g. when a hit on the
+        rewritten-query key needs to also seed the original-query key so the
+        latter is reachable by semantic match next time).
+        """
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        timestamp, _value, embedding = entry
+        if self._is_expired(timestamp):
+            return None
+        return embedding
+
     def semantic_get(
         self,
         query_embedding: List[float],

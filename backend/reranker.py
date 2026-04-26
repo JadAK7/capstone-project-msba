@@ -207,6 +207,7 @@ def rerank(
                     "role": "system",
                     "content": (
                         "You are an evidence judge for a university library chatbot. "
+
                         "Given a user question and numbered text passages, score each passage on "
                         "how well it provides DIRECT EVIDENCE to answer the question.\n\n"
                         "This is NOT about topic relevance — it is about answer support.\n"
@@ -233,6 +234,7 @@ def rerank(
                 },
             ],
             max_tokens=600,
+            call_type="rerank",
         )
         json_match = re.search(r"\[.*\]", raw, re.DOTALL)
         if json_match:

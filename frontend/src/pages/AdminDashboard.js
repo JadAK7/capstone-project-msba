@@ -40,6 +40,8 @@ import {
   uploadDocument,
   getDocuments,
   deleteDocument,
+  downloadBackup,
+  restoreDatabase,
 } from '../api';
 
 // ---------------------------------------------------------------------------
@@ -60,9 +62,36 @@ function Toast({ message, type, onClose }) {
 }
 
 // ---------------------------------------------------------------------------
+// Persistent operation banner — shows across all tabs until manually dismissed
+// (only the "running" state is non-dismissable; success/error stays until X)
+// ---------------------------------------------------------------------------
+function PersistentBanner({ label, status, message, onClose }) {
+  if (!status) return null;
+  const running = status === 'running';
+  return (
+    <div className={`admin-persistent-banner admin-persistent-banner-${status}`}>
+      {running && <span className="admin-persistent-spinner" />}
+      <div className="admin-persistent-content">
+        <strong className="admin-persistent-label">{label}:</strong>{' '}
+        <span>{message}</span>
+      </div>
+      {!running && (
+        <button
+          className="admin-persistent-close"
+          onClick={onClose}
+          aria-label="Dismiss"
+        >
+          x
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // System Status Tab
 // ---------------------------------------------------------------------------
-function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
+function SystemStatusTab({ scraping, onRescrape, restoring, onRestore }) {
   const [health, setHealth] = useState(null);
   const [systemInfo, setSystemInfo] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -70,6 +99,11 @@ function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
   const [clearingCache, setClearingCache] = useState(false);
   const [deletingFeedback, setDeletingFeedback] = useState(false);
   const [toast, setToast] = useState(null);
+
+  // Backup state (restore is lifted to parent so its banner survives tab switches)
+  const [backingUp, setBackingUp] = useState(false);
+  const [restoreFile, setRestoreFile] = useState(null);
+  const restoreInputRef = React.useRef(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -95,6 +129,17 @@ function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
     prevScraping.current = scraping;
   }, [scraping, loadData]);
 
+  // Reload system info when restore finishes
+  const prevRestoring = React.useRef(restoring);
+  useEffect(() => {
+    if (prevRestoring.current && !restoring) {
+      loadData();
+      setRestoreFile(null);
+      if (restoreInputRef.current) restoreInputRef.current.value = '';
+    }
+    prevRestoring.current = restoring;
+  }, [restoring, loadData]);
+
   const handleReindex = async () => {
     if (!window.confirm('This will rebuild all collections from CSV source files. Continue?')) return;
     setReindexing(true);
@@ -107,6 +152,37 @@ function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
     } finally {
       setReindexing(false);
     }
+  };
+
+  const handleBackup = async () => {
+    setBackingUp(true);
+    try {
+      const { blob, filename } = await downloadBackup();
+      // Trigger browser download without opening a new tab
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setToast({ message: `Backup downloaded: ${filename}`, type: 'success' });
+    } catch (err) {
+      setToast({ message: `Backup failed: ${err.message}`, type: 'error' });
+    } finally {
+      setBackingUp(false);
+    }
+  };
+
+  const handleRestoreFileChange = (e) => {
+    const f = e.target.files?.[0] || null;
+    setRestoreFile(f);
+  };
+
+  const handleRestoreClick = () => {
+    if (!restoreFile) return;
+    onRestore(restoreFile);
   };
 
   if (loading) return <div className="admin-loading">Loading system status...</div>;
@@ -224,9 +300,62 @@ function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
           )}
         </button>
       </div>
-      {scraping && scrapeMessage && (
-        <div className="admin-scrape-status">{scrapeMessage}</div>
-      )}
+      <h3 className="admin-section-title">Backup &amp; Restore</h3>
+      <div className="admin-backup-section">
+        {/* Backup */}
+        <div className="admin-backup-panel">
+          <p className="admin-backup-desc">
+            Download a full SQL dump of the database. Store it somewhere safe — it
+            includes all conversations, feedback, FAQs, and embeddings.
+          </p>
+          <button
+            className="admin-btn admin-btn-secondary"
+            onClick={handleBackup}
+            disabled={backingUp || restoring}
+          >
+            {backingUp ? (
+              <span className="admin-btn-loading">Generating backup…</span>
+            ) : (
+              '⬇ Download Backup'
+            )}
+          </button>
+        </div>
+
+        {/* Restore */}
+        <div className="admin-restore-panel">
+          <p className="admin-backup-desc admin-restore-warning">
+            ⚠️ Restore will <strong>replace all current data</strong> with the contents
+            of the backup file. Only upload <code>.backup</code> files produced by this dashboard.
+          </p>
+          <div className="admin-restore-row">
+            <label className="admin-file-label">
+              <input
+                ref={restoreInputRef}
+                type="file"
+                accept=".backup"
+                onChange={handleRestoreFileChange}
+                disabled={restoring}
+                className="admin-file-input"
+              />
+              <span className="admin-file-btn">Choose .backup file</span>
+              {restoreFile && (
+                <span className="admin-file-name">{restoreFile.name}</span>
+              )}
+            </label>
+            <button
+              className="admin-btn admin-btn-danger"
+              onClick={handleRestoreClick}
+              disabled={!restoreFile || restoring || backingUp}
+            >
+              {restoring ? (
+                <span className="admin-btn-loading">Restoring…</span>
+              ) : (
+                'Restore Database'
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -234,7 +363,7 @@ function SystemStatusTab({ scraping, scrapeMessage, onRescrape }) {
 // ---------------------------------------------------------------------------
 // Data Management Tab
 // ---------------------------------------------------------------------------
-function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
+function DataManagementTab({ scraping, onRescrape }) {
   const [activeCollection, setActiveCollection] = useState('faq');
   const [entries, setEntries] = useState([]);
   const [total, setTotal] = useState(0);
@@ -459,9 +588,6 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
               'Re-scrape Library Website'
             )}
           </button>
-          {scraping && scrapeMessage && (
-            <div className="admin-scrape-status">{scrapeMessage}</div>
-          )}
         </div>
       )}
 
@@ -482,9 +608,6 @@ function DataManagementTab({ scraping, scrapeMessage, onRescrape }) {
                 'Re-scrape Library Website'
               )}
             </button>
-            {scraping && scrapeMessage && (
-              <div className="admin-scrape-status">{scrapeMessage}</div>
-            )}
           </div>
           <div className="chunk-search-bar">
             <input
@@ -1698,8 +1821,15 @@ function AdminDashboard() {
   const [authenticated, setAuthenticated] = useState(!!getStoredToken());
   const [checking, setChecking] = useState(true);
   const [activeTab, setActiveTab] = useState('status');
+
+  // Rescrape: `scraping` drives button loading state.
+  // `scrapeBanner` drives the persistent banner (running/success/error) across tabs.
   const [scraping, setScraping] = useState(false);
-  const [scrapeMessage, setScrapeMessage] = useState('');
+  const [scrapeBanner, setScrapeBanner] = useState(null);
+
+  // Restore: same pattern — lifted so banner survives tab switches.
+  const [restoring, setRestoring] = useState(false);
+  const [restoreBanner, setRestoreBanner] = useState(null);
 
   // Verify stored token on mount
   useEffect(() => {
@@ -1728,27 +1858,59 @@ function AdminDashboard() {
   const handleRescrape = useCallback(async () => {
     if (!window.confirm('This will re-scrape the AUB library website and rebuild library pages and document chunks. This may take several minutes. Continue?')) return;
     setScraping(true);
-    setScrapeMessage('Starting scrape...');
+    setScrapeBanner({ status: 'running', message: 'Starting scrape...' });
     try {
       await triggerRescrape();
       const poll = setInterval(async () => {
         try {
           const status = await getRescrapeStatus();
-          setScrapeMessage(status.message || 'Scraping...');
-          if (!status.running) {
+          if (status.running) {
+            setScrapeBanner({ status: 'running', message: status.message || 'Scraping...' });
+          } else {
             clearInterval(poll);
             setScraping(false);
-            setScrapeMessage('');
+            if (status.error) {
+              setScrapeBanner({ status: 'error', message: `Rescrape failed: ${status.error}` });
+            } else {
+              const pages = status.pages_scraped ? ` (${status.pages_scraped} pages)` : '';
+              setScrapeBanner({
+                status: 'success',
+                message: `${status.message || 'Rescrape completed successfully.'}${pages}`,
+              });
+            }
           }
-        } catch {
+        } catch (err) {
           clearInterval(poll);
           setScraping(false);
-          setScrapeMessage('');
+          setScrapeBanner({ status: 'error', message: `Status check failed: ${err.message}` });
         }
       }, 3000);
-    } catch {
+    } catch (err) {
       setScraping(false);
-      setScrapeMessage('');
+      setScrapeBanner({ status: 'error', message: `Rescrape failed: ${err.message}` });
+    }
+  }, []);
+
+  const handleRestore = useCallback(async (file) => {
+    if (!file) return;
+    if (!window.confirm(
+      `⚠️ WARNING: Restoring from "${file.name}" will REPLACE all current data — ` +
+      'conversations, feedback, FAQs, and all embeddings.\n\n' +
+      'This cannot be undone. Are you absolutely sure?'
+    )) return;
+
+    setRestoring(true);
+    setRestoreBanner({ status: 'running', message: `Restoring from "${file.name}"...` });
+    try {
+      const result = await restoreDatabase(file);
+      setRestoreBanner({
+        status: 'success',
+        message: result.message || 'Database restored successfully.',
+      });
+    } catch (err) {
+      setRestoreBanner({ status: 'error', message: `Restore failed: ${err.message}` });
+    } finally {
+      setRestoring(false);
     }
   }, []);
 
@@ -1777,6 +1939,19 @@ function AdminDashboard() {
             Logout
           </button>
         </div>
+
+        <PersistentBanner
+          label="Re-scrape"
+          status={scrapeBanner?.status}
+          message={scrapeBanner?.message}
+          onClose={() => setScrapeBanner(null)}
+        />
+        <PersistentBanner
+          label="Restore"
+          status={restoreBanner?.status}
+          message={restoreBanner?.message}
+          onClose={() => setRestoreBanner(null)}
+        />
 
         <div className="admin-tabs">
           <button
@@ -1811,8 +1986,15 @@ function AdminDashboard() {
           </button>
         </div>
 
-        {activeTab === 'status' && <SystemStatusTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
-        {activeTab === 'data' && <DataManagementTab scraping={scraping} scrapeMessage={scrapeMessage} onRescrape={handleRescrape} />}
+        {activeTab === 'status' && (
+          <SystemStatusTab
+            scraping={scraping}
+            onRescrape={handleRescrape}
+            restoring={restoring}
+            onRestore={handleRestore}
+          />
+        )}
+        {activeTab === 'data' && <DataManagementTab scraping={scraping} onRescrape={handleRescrape} />}
         {activeTab === 'analytics' && <AnalyticsTab />}
         {activeTab === 'conversations' && <ConversationsTab />}
         {activeTab === 'escalations' && <EscalationsTab />}

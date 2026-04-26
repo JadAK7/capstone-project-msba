@@ -353,6 +353,48 @@ export async function clearCache() {
 }
 
 // ---------------------------------------------------------------------------
+// Admin API -- Database backup & restore
+// ---------------------------------------------------------------------------
+
+/**
+ * Download a full pg_dump of the database.
+ * Returns a Blob that the caller should trigger as a file download.
+ */
+export async function downloadBackup() {
+  const res = await adminFetch(`${API_BASE}/api/admin/backup`, {
+    headers: adminHeadersNoBody(),
+  });
+  if (!res.ok) {
+    const e = await res.text();
+    throw new Error(`Backup failed: ${res.status} - ${e}`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="?([^"]+)"?/);
+  const filename = match ? match[1] : 'aub_library_backup.sql';
+  return { blob, filename };
+}
+
+/**
+ * Upload a .backup file and restore the database from it.
+ * This is destructive — all existing data will be replaced.
+ */
+export async function restoreDatabase(file) {
+  const token = getStoredToken();
+  const formData = new FormData();
+  formData.append('file', file);
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await adminFetch(`${API_BASE}/api/admin/restore`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+  if (!res.ok) { const e = await res.text(); throw new Error(`Restore failed: ${res.status} - ${e}`); }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Admin API -- Analytics
 // ---------------------------------------------------------------------------
 

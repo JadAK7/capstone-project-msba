@@ -16,7 +16,7 @@ Pipeline v3:
 
 import re
 import numpy as np
-from openai import OpenAI
+
 from typing import List, Tuple, Optional
 import logging
 
@@ -28,6 +28,7 @@ from .database import DatabaseUnavailableError
 from .retriever import hybrid_retrieve, classify_query_intent
 from .reranker import rerank, _get_chunk_text
 from .input_guard import run_input_guards, get_refusal_message
+from .stage_timer import StageTimer
 
 
 # Regex-based output sanitizer for XSS defense-in-depth.
@@ -57,7 +58,9 @@ logger = logging.getLogger(__name__)
 
 
 class Config:
-    EMBEDDING_MODEL = "text-embedding-3-small"
+    # EMBEDDING_MODEL and EMBEDDING_DIM are resolved from the
+    # OPENAI_EMBEDDING_MODEL env var in embeddings.py.
+    from .embeddings import EMBEDDING_MODEL, EMBEDDING_DIM
 
     FAQ_COLLECTION = "faq"
     DB_COLLECTION = "databases"
@@ -140,10 +143,6 @@ class EmbeddingUtils:
         )
         s = re.sub(r"\s+", " ", s).strip()
         return s
-
-
-
-# IntentDetector has been consolidated into intent_classifier.py
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +293,6 @@ class LibraryChatbot:
     FEEDBACK_MIN_SIMILARITY = 0.85
 
     def __init__(self, api_key: str):
-        self.client = OpenAI(api_key=api_key)
         self._cache = ResponseCache(max_size=1024, ttl_seconds=3600)
 
         # Verify tables exist and have data
@@ -461,8 +459,11 @@ class LibraryChatbot:
     ) -> Tuple[str, dict]:
         """Internal pipeline — separated so top-level answer() can catch LLM failures."""
 
+        timer = StageTimer()
+
         # --- 1. Input safety guards (runs BEFORE retrieval or LLM) ---
-        guard_result = run_input_guards(query)
+        with timer.time("input_guards"):
+            guard_result = run_input_guards(query)
         if not guard_result.allowed:
             refusal = get_refusal_message(guard_result.refusal_reason, lang)
             debug = {
@@ -475,6 +476,7 @@ class LibraryChatbot:
                 "guard_out_of_scope": guard_result.out_of_scope,
                 "guard_refusal_reason": guard_result.refusal_reason,
                 "guard_matched_patterns": guard_result.matched_patterns,
+                "stage_latencies": timer.as_dict(),
             }
             logger.warning(
                 f"Query blocked by input guard: reason={guard_result.refusal_reason} "
@@ -482,62 +484,68 @@ class LibraryChatbot:
             )
             return refusal, debug
 
-        # --- Early cache check on original query (before LLM rewrite) ---
-        # This avoids a wasted LLM call when the same query is repeated.
-        # Feedback must still override cache, so check feedback first.
-        feedback = self._lookup_feedback(query)
+        # --- Early cache check + feedback on original query ---
+        with timer.time("feedback_correction"):
+            feedback = self._lookup_feedback(query)
 
         original_cache_key = (query.strip().lower(), lang)
-        if not feedback:
-            cached = self._cache.get(original_cache_key)
-            if cached is not None:
-                answer, debug = cached
-                debug = dict(debug)
-                debug["cache_hit"] = True
-                return answer, debug
+        with timer.time("cache_lookup"):
+            if not feedback:
+                cached = self._cache.get(original_cache_key)
+                if cached is not None:
+                    answer, debug = cached
+                    debug = dict(debug)
+                    debug["cache_hit"] = True
+                    return answer, debug
 
         # --- 2. Query rewriting (LLM-based) ---
         # Rewritten query is English, self-contained, optimized for retrieval.
         # Original query is preserved for answer generation (to match user's language).
-        rewritten_query, rewrite_debug = rewrite_query(
-            query=query, history=history, lang=lang,
-        )
+        with timer.time("query_rewriting"):
+            rewritten_query, rewrite_debug = rewrite_query(
+                query=query, history=history, lang=lang,
+            )
 
         # --- Check for admin feedback on rewritten query too ---
-        if not feedback:
-            feedback = self._lookup_feedback(rewritten_query)
+        with timer.time("feedback_correction"):
+            if not feedback:
+                feedback = self._lookup_feedback(rewritten_query)
 
         # --- Secondary cache lookup (keyed on rewritten query + language) ---
-        # Catches cases where different phrasings rewrite to the same query.
         cache_key = (rewritten_query, lang)
-        if not feedback:
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                answer, debug = cached
-                debug = dict(debug)
-                debug["cache_hit"] = True
-                # Also store under original key so next identical query hits early cache
-                self._cache.put(original_cache_key, cached)
-                return answer, debug
+        with timer.time("cache_lookup"):
+            if not feedback:
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    answer, debug = cached
+                    debug = dict(debug)
+                    debug["cache_hit"] = True
+                    # Propagate the embedding from the matched entry so the
+                    # original-query key is reachable by semantic match later.
+                    cached_embedding = self._cache.get_embedding(cache_key)
+                    self._cache.put(
+                        original_cache_key,
+                        cached,
+                        embedding=cached_embedding.tolist() if cached_embedding is not None else None,
+                    )
+                    return answer, debug
 
         # --- Embed query ONCE for reuse in semantic cache + retrieval ---
-        # This avoids redundant embedding calls across tables in hybrid_retrieve.
-        query_embedding = embed_text(rewritten_query)
+        with timer.time("query_rewriting"):
+            query_embedding = embed_text(rewritten_query)
 
         # --- Semantic cache lookup ---
-        # Even if exact key missed, a semantically similar cached query may match.
-        # Cosine similarity >= 0.95 catches rephrasings the rewriter didn't normalize.
-        if not feedback:
-            cached = self._cache.semantic_get(query_embedding, lang)
-            if cached is not None:
-                answer, debug = cached
-                debug = dict(debug)
-                debug["cache_hit"] = True
-                debug["semantic_cache_hit"] = True
-                # Store under both keys so future exact matches are fast
-                self._cache.put(original_cache_key, cached, embedding=query_embedding)
-                self._cache.put(cache_key, cached, embedding=query_embedding)
-                return answer, debug
+        with timer.time("cache_lookup"):
+            if not feedback:
+                cached = self._cache.semantic_get(query_embedding, lang)
+                if cached is not None:
+                    answer, debug = cached
+                    debug = dict(debug)
+                    debug["cache_hit"] = True
+                    debug["semantic_cache_hit"] = True
+                    self._cache.put(original_cache_key, cached, embedding=query_embedding)
+                    self._cache.put(cache_key, cached, embedding=query_embedding)
+                    return answer, debug
 
         # Helper to store result under both cache keys (with embedding for semantic matching)
         def _cache_result(result):
@@ -545,7 +553,26 @@ class LibraryChatbot:
             self._cache.put(original_cache_key, result, embedding=query_embedding)
 
         # --- 3. Intent classification → pre-filtering ---
-        intent_info = classify_query_intent(rewritten_query)
+        # Use LLM intent from the rewriter when available; fall back to keyword classifier.
+        with timer.time("intent_classification"):
+            llm_intent = rewrite_debug.get("llm_intent")
+            if llm_intent and llm_intent in ("hours", "database", "faq", "contact", "general"):
+                # The rewriter already classified intent — run keyword classifier as
+                # a fallback only when the rewrite was skipped.
+                keyword_info = classify_query_intent(rewritten_query)
+                # Prefer LLM intent; keyword classifier still provides tables/page_types
+                intent_info = dict(keyword_info)
+                intent_info["intent"] = llm_intent
+                if llm_intent == "database":
+                    intent_info["is_database_intent"] = True
+                logger.debug(
+                    "Using LLM intent '%s' (keyword fallback was '%s')",
+                    llm_intent,
+                    keyword_info["intent"],
+                )
+            else:
+                intent_info = classify_query_intent(rewritten_query)
+
         is_db_intent = intent_info.get("is_database_intent", False) or intent_info["intent"] == "database"
 
         # Determine which tables to search based on intent
@@ -566,37 +593,38 @@ class LibraryChatbot:
             search_tables.append("custom_notes")
 
         # --- 4. Hybrid retrieval with pre-filtering ---
-        raw_candidates = hybrid_retrieve(
-            query=rewritten_query,
-            tables=search_tables,
-            n_vector=20,
-            n_keyword=15,
-            n_final=30,
-            page_type_filter=intent_info.get("page_types"),
-            query_embedding=query_embedding,
-        )
-
-        # If pre-filtered retrieval found too few results, retry without filter
-        if len(raw_candidates) < 3 and intent_info.get("page_types"):
-            logger.info("Pre-filtered retrieval returned <3 results, retrying unfiltered")
+        with timer.time("hybrid_retrieval"):
             raw_candidates = hybrid_retrieve(
                 query=rewritten_query,
                 tables=search_tables,
                 n_vector=20,
                 n_keyword=15,
                 n_final=30,
-                page_type_filter=None,
+                page_type_filter=intent_info.get("page_types"),
                 query_embedding=query_embedding,
             )
 
+            # If pre-filtered retrieval found too few results, retry without filter
+            if len(raw_candidates) < 3 and intent_info.get("page_types"):
+                logger.info("Pre-filtered retrieval returned <3 results, retrying unfiltered")
+                raw_candidates = hybrid_retrieve(
+                    query=rewritten_query,
+                    tables=search_tables,
+                    n_vector=20,
+                    n_keyword=15,
+                    n_final=30,
+                    page_type_filter=None,
+                    query_embedding=query_embedding,
+                )
+
         # --- 5. Cross-encoder reranking (local, no API cost) ---
-        # Rerank with LLM scoring (0-1 scale)
-        reranked = rerank(
-            query=rewritten_query,
-            candidates=raw_candidates,
-            top_k=6,
-            min_score=0.45,
-        )
+        with timer.time("llm_reranking"):
+            reranked = rerank(
+                query=rewritten_query,
+                candidates=raw_candidates,
+                top_k=6,
+                min_score=0.45,
+            )
 
         # Build retrieved_chunks for logging/debug — now includes source_type
         retrieved_chunks = []
@@ -676,7 +704,6 @@ class LibraryChatbot:
         # --- Admin feedback takes highest priority ---
         if feedback:
             if feedback["rating"] == -1 and feedback.get("corrected_answer"):
-                # Negative feedback with correction: use the admin's corrected answer
                 debug["chosen_source"] = "admin_feedback_correction"
                 debug["feedback_correction"] = feedback["corrected_answer"]
                 debug["feedback_similarity"] = feedback["similarity"]
@@ -684,18 +711,18 @@ class LibraryChatbot:
                     query=query, corrected_answer=feedback["corrected_answer"],
                     lang=lang, history=history,
                 )
+                debug["stage_latencies"] = timer.as_dict()
                 result = (formatted, debug)
                 _cache_result(result)
                 return result
             elif feedback["rating"] == 1 and feedback.get("original_answer"):
-                # Positive feedback: the original answer was confirmed good.
-                # Return it directly (skip the whole retrieval/generation pipeline).
                 debug["chosen_source"] = "admin_feedback_confirmed"
                 debug["feedback_similarity"] = feedback["similarity"]
                 formatted = self._format_feedback_answer(
                     query=query, corrected_answer=feedback["original_answer"],
                     lang=lang, history=history,
                 )
+                debug["stage_latencies"] = timer.as_dict()
                 result = (formatted, debug)
                 _cache_result(result)
                 return result
@@ -704,6 +731,7 @@ class LibraryChatbot:
         if is_db_intent and best_db_score > 0:
             debug["chosen_source"] = "database (keyword intent)"
             db_candidates = [c for c in reranked if c.get("source_table") == "databases"]
+            debug["stage_latencies"] = timer.as_dict()
             result = (self._format_db_recommendations(db_candidates, lang, k=5), debug)
             _cache_result(result)
             return result
@@ -740,14 +768,18 @@ class LibraryChatbot:
                 # treats the notes as authoritative — no evidence planning or
                 # claim audit that would reject "refer to this link" style answers.
                 if chosen_source == "faculty_text (admin)":
-                    gen_result = self._format_faculty_text_answer(
-                        query, top_chunks, lang, history=history,
-                    )
+                    with timer.time("generation"):
+                        gen_result = self._format_faculty_text_answer(
+                            query, top_chunks, lang, history=history,
+                        )
                     debug["context_sent_to_llm"] = gen_result["context_sent"]
                     debug["draft_answer"] = gen_result["answer"]
                     debug["removed_claims"] = []
                     debug["verified"] = True
                     debug["context_confidence"] = "confident (admin source)"
+                    with timer.time("verification"):
+                        pass  # merged into generation for admin source
+                    debug["stage_latencies"] = timer.as_dict()
 
                     result = (gen_result["answer"], debug)
                     _cache_result(result)
@@ -759,15 +791,19 @@ class LibraryChatbot:
                         f"Fast path: top_score={top_score:.3f} >= {cfg.fast_path_threshold}, "
                         f"skipping evidence planning pipeline"
                     )
-                    gen_result = self._format_fast_path_answer(
-                        query, top_chunks, lang, history=history,
-                    )
+                    with timer.time("generation"):
+                        gen_result = self._format_fast_path_answer(
+                            query, top_chunks, lang, history=history,
+                        )
                     debug["context_sent_to_llm"] = gen_result["context_sent"]
                     debug["draft_answer"] = gen_result["answer"]
                     debug["removed_claims"] = []
                     debug["verified"] = True
                     debug["context_confidence"] = "high (fast path)"
                     debug["pipeline"] = "fast_path"
+                    with timer.time("verification"):
+                        pass  # regex-only check already done inside fast_path_answer
+                    debug["stage_latencies"] = timer.as_dict()
 
                     result = (gen_result["answer"], debug)
                     _cache_result(result)
@@ -776,33 +812,39 @@ class LibraryChatbot:
                 # Standard grounded pipeline for scraped/FAQ sources
                 is_partial = top_score < cfg.confident_threshold
 
-                gen_result = self._format_grounded_answer(
-                    query, top_chunks, lang,
-                    history=history,
-                    partial_context=is_partial,
-                )
+                with timer.time("generation"):
+                    gen_result = self._format_grounded_answer(
+                        query, top_chunks, lang,
+                        history=history,
+                        partial_context=is_partial,
+                    )
+                # Verification is merged into generation via generate_and_verify;
+                # record a near-zero timer entry to keep stage_latencies complete.
+                with timer.time("verification"):
+                    pass
                 debug["context_sent_to_llm"] = gen_result["context_sent"]
                 debug["draft_answer"] = gen_result["draft_answer"]
                 debug["removed_claims"] = gen_result["removed_claims"]
                 debug["verified"] = len(gen_result["removed_claims"]) == 0
                 debug["context_confidence"] = "partial" if is_partial else "confident"
 
+                debug["stage_latencies"] = timer.as_dict()
                 result = (gen_result["answer"], debug)
                 _cache_result(result)
                 return result
 
             except LLMUnavailableError:
-                # Partial degradation: retrieval succeeded but LLM generation failed.
-                # Return top 3 chunk summaries as a raw "Here's what I found:" response.
                 logger.warning("LLM generation failed after successful retrieval, returning raw chunks")
                 answer = self._format_raw_chunks_fallback(top_chunks[:3], lang)
                 debug["degradation_type"] = "llm_generation_failed"
                 debug["pipeline"] = "raw_chunks_fallback"
+                debug["stage_latencies"] = timer.as_dict()
                 return answer, debug
 
         # --- Fallback: context too weak, abstain rather than hallucinate ---
         debug["chosen_source"] = "none (below threshold)"
         debug["top_rerank_score"] = top_score
+        debug["stage_latencies"] = timer.as_dict()
         result = (self._format_unclear(lang), debug)
         _cache_result(result)
         return result
