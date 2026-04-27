@@ -1045,9 +1045,11 @@ class LibraryChatbot:
         for i, chunk in enumerate(chunks):
             text = _get_chunk_text(chunk)
             meta = chunk.get("metadata", {})
-            page_title = meta.get("page_title", meta.get("title", meta.get("question", f"Source {i+1}")))
+            page_title = meta.get("page_title", meta.get("title", meta.get("question", meta.get("name", f"Source {i+1}"))))
             section = meta.get("section_title", "")
             url = meta.get("page_url", meta.get("url", ""))
+            if not url and chunk.get("source_table") == "databases":
+                url = "https://aub.edu.lb.libguides.com/az.php"
 
             header = f"[Source: {page_title}"
             if section:
@@ -1140,10 +1142,12 @@ class LibraryChatbot:
             text = _get_chunk_text(chunk)
             meta = chunk.get("metadata", {})
 
-            page_title = meta.get("page_title", meta.get("title", meta.get("question", f"Source {i+1}")))
+            page_title = meta.get("page_title", meta.get("title", meta.get("question", meta.get("name", f"Source {i+1}"))))
             section = meta.get("section_title", "")
             page_type = meta.get("page_type", "")
             url = meta.get("page_url", meta.get("url", ""))
+            if not url and chunk.get("source_table") == "databases":
+                url = "https://aub.edu.lb.libguides.com/az.php"
 
             score = chunk.get("rerank_score", chunk.get("rrf_score", 0))
             confidence = "HIGH" if score >= 0.7 else "MEDIUM" if score >= 0.5 else "LOW"
