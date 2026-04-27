@@ -87,7 +87,14 @@ class AdminManager:
                 for name in [Config.FAQ_COLLECTION, Config.DB_COLLECTION, Config.LIBRARY_COLLECTION, "document_chunks", "custom_notes"]:
                     table = _TABLE_META[name]["table"]
                     try:
-                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        if table == "custom_notes":
+                            # Count only base rows, not chunk rows (note_X_cN)
+                            cur.execute(
+                                "SELECT COUNT(*) FROM custom_notes WHERE id NOT LIKE %s ESCAPE %s",
+                                ("%\\_c%", "\\"),
+                            )
+                        else:
+                            cur.execute(f"SELECT COUNT(*) FROM {table}")
                         count = cur.fetchone()[0]
                     except Exception:
                         conn.rollback()
@@ -103,26 +110,41 @@ class AdminManager:
 
         table = meta["table"]
         metadata_cols = meta["metadata_cols"]
+        doc_col = "chunk_text" if table == "document_chunks" else "document"
+        cols = ", ".join(metadata_cols)
+
+        # Pattern used to identify chunk rows (note_X_c1, note_X_c2, …).
+        # Passed as a query parameter to avoid psycopg2 treating the literal
+        # '%' signs in the LIKE pattern as parameter placeholders.
+        _CHUNK_PATTERN = "%\\_c%"
+        _ESCAPE_CHAR = "\\"
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # For custom_notes, hide chunk rows (note_X_cN) — only show base rows
-                chunk_filter = ""
                 if table == "custom_notes":
-                    chunk_filter = "WHERE id NOT LIKE '%\\_c%' ESCAPE '\\'"
-
-                cur.execute(f"SELECT COUNT(*) FROM {table} {chunk_filter}")
+                    cur.execute(
+                        "SELECT COUNT(*) FROM custom_notes WHERE id NOT LIKE %s ESCAPE %s",
+                        (_CHUNK_PATTERN, _ESCAPE_CHAR),
+                    )
+                else:
+                    cur.execute(f"SELECT COUNT(*) FROM {table}")
                 total = cur.fetchone()[0]
 
                 if total == 0:
                     return {"entries": [], "total": 0, "offset": offset, "limit": limit}
 
-                doc_col = "chunk_text" if table == "document_chunks" else "document"
-                cols = ", ".join(metadata_cols)
-                cur.execute(
-                    f"SELECT id, {doc_col}, {cols} FROM {table} {chunk_filter} ORDER BY id LIMIT %s OFFSET %s",
-                    (limit, offset),
-                )
+                if table == "custom_notes":
+                    cur.execute(
+                        f"SELECT id, {doc_col}, {cols} FROM {table} "
+                        "WHERE id NOT LIKE %s ESCAPE %s "
+                        "ORDER BY id LIMIT %s OFFSET %s",
+                        (_CHUNK_PATTERN, _ESCAPE_CHAR, limit, offset),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT id, {doc_col}, {cols} FROM {table} ORDER BY id LIMIT %s OFFSET %s",
+                        (limit, offset),
+                    )
                 rows = cur.fetchall()
 
         entries = []
@@ -403,17 +425,22 @@ class AdminManager:
             with conn.cursor() as cur:
                 for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
                     if i == 0:
-                        # Base row: stores full content for admin display
+                        # Base row: stores full content for admin display.
+                        # The 'content' column keeps the original text so the
+                        # edit form pre-fills correctly; 'document' holds the
+                        # combined label+content string for keyword search.
                         row_id = base_id
                         doc = full_document
+                        stored_content = content
                     else:
-                        # Chunk rows: store only the chunk text
+                        # Chunk rows: store the chunk text for focused retrieval.
                         row_id = f"{base_id}_c{i}"
                         doc = chunk["text"]
+                        stored_content = chunk["text"]
                     cur.execute(
                         "INSERT INTO custom_notes (id, document, embedding, label, content) "
                         "VALUES (%s, %s, %s, %s, %s)",
-                        (row_id, doc, np.array(emb), label, chunk["text"]),
+                        (row_id, doc, np.array(emb), label, stored_content),
                     )
             conn.commit()
 
@@ -447,13 +474,15 @@ class AdminManager:
                     if i == 0:
                         row_id = entry_id
                         doc = full_document
+                        stored_content = content
                     else:
                         row_id = f"{entry_id}_c{i}"
                         doc = chunk["text"]
+                        stored_content = chunk["text"]
                     cur.execute(
                         "INSERT INTO custom_notes (id, document, embedding, label, content) "
                         "VALUES (%s, %s, %s, %s, %s)",
-                        (row_id, doc, np.array(emb), label, chunk["text"]),
+                        (row_id, doc, np.array(emb), label, stored_content),
                     )
             conn.commit()
 

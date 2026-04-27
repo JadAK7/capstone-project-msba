@@ -35,6 +35,15 @@ chat_logs.json
 
 # Evaluation results (runtime-generated)
 eval_*.json
+eval_run_*/
+baseline_before_fixes/
+
+# Diagnostic outputs (runtime-generated)
+diagnose_*.json
+
+# Large binary deliverables (keep locally, not in git)
+*.pptx
+*.docx
 
 # Claude Code project instructions
 CLAUDE.md

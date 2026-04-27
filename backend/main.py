@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import secrets
 import json as _json
+from datetime import datetime
 from typing import Optional, List
 
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=True
 from fastapi import FastAPI, HTTPException, Request, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -33,7 +34,7 @@ from .index_builder import IndexBuilder
 from .admin import AdminManager, set_last_index_build_time, set_last_scrape_time
 from .analytics import ChatLogger, AnalyticsComputer
 from .evaluation import evaluate_single, run_evaluation_pipeline
-from .llm_client import is_llm_available
+from .llm_client import is_llm_available, llm_info
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,12 +109,27 @@ _chat_logger = ChatLogger()
 _analytics = AnalyticsComputer()
 
 # Scrape task state
+# Mutated by the daemon scrape thread and read by HTTP polling. The lock
+# guards against polling clients seeing a half-updated snapshot.
 _scrape_status = {
     "running": False,
     "message": "",
     "pages_scraped": 0,
     "error": None,
 }
+_scrape_status_lock = threading.Lock()
+
+
+def _set_scrape_status(**updates) -> None:
+    """Atomically update fields on the scrape status dict."""
+    with _scrape_status_lock:
+        _scrape_status.update(updates)
+
+
+def _get_scrape_status() -> dict:
+    """Return a snapshot copy of the current scrape status."""
+    with _scrape_status_lock:
+        return dict(_scrape_status)
 
 
 def get_chatbot() -> LibraryChatbot:
@@ -283,6 +299,7 @@ def health():
     """Check if the chatbot is initialized and indices are ready."""
     try:
         bot = get_chatbot()
+        from .embeddings import EMBEDDING_MODEL, EMBEDDING_DIM
         return {
             "status": "ok",
             "faq_count": bot.get_collection_count("faq"),
@@ -290,6 +307,9 @@ def health():
             "library_available": bot.library_available,
             "supported_languages": ["en", "ar"],
             "llm_available": is_llm_available(),
+            "llm": llm_info(),
+            "embedding_model": EMBEDDING_MODEL,
+            "embedding_dim": EMBEDDING_DIM,
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -362,6 +382,8 @@ def chat(request: Request, req: ChatRequest):
             guard_out_of_scope=debug.get("guard_out_of_scope", False),
             guard_refusal_reason=debug.get("guard_refusal_reason", ""),
             guard_matched_patterns=debug.get("guard_matched_patterns", []),
+            # Per-stage latency instrumentation
+            stage_latencies=debug.get("stage_latencies"),
         )
     except Exception as e:
         logger.warning(f"Chat logging failed (non-critical): {e}")
@@ -836,12 +858,48 @@ def analytics_unanswered_queries():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/admin/analytics/latency")
+def analytics_latency():
+    """Return mean per-stage latencies across all chat conversations.
+
+    Response format:
+        {
+          "mean_latencies_ms": {
+            "input_guards": 12.3,
+            "query_rewriting": 450.1,
+            ...
+          },
+          "sample_count": 142
+        }
+    """
+    try:
+        return _analytics.latency_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/admin/analytics/charts")
 def analytics_charts():
     """Generate all analytics charts as base64-encoded PNGs."""
     try:
+        from .chart_generator import generate_latency_chart
+
         charts = _analytics.compute_charts()
         extended_summary = _analytics.compute_extended_summary()
+
+        # Attach latency stacked bar chart if data is available
+        latency_data = _analytics.latency_stats()
+        if latency_data.get("sample_count", 0) > 0:
+            img = generate_latency_chart(
+                latency_data["mean_latencies_ms"],
+                latency_data["sample_count"],
+            )
+            if img:
+                charts.setdefault("performance", {})["stage_latency"] = {
+                    "title": "Mean Pipeline Stage Latency",
+                    "image": img,
+                }
+
         return {
             "charts": charts,
             "extended_summary": extended_summary,
@@ -852,20 +910,179 @@ def analytics_charts():
 
 
 # ---------------------------------------------------------------------------
+# Admin endpoints -- Database backup & restore (pure Python, no pg_dump/psql)
+#
+# Uses psycopg2's COPY protocol directly — no external binaries required.
+# Works whether PostgreSQL is in Docker, on the host, or remote.
+#
+# Backup format: JSON file containing one CSV block per table.
+# File extension: .backup  (to distinguish from raw SQL dumps)
+# ---------------------------------------------------------------------------
+
+# Tables exported in this order (respects FK dependencies on restore).
+_BACKUP_TABLES = [
+    "faq",
+    "databases",
+    "library_pages",
+    "document_chunks",
+    "custom_notes",
+    "chat_conversations",
+    "chat_feedback",      # FK → chat_conversations; must come after
+    "escalations",
+]
+
+
+def _table_exists(cur, table: str) -> bool:
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = %s)",
+        (table,),
+    )
+    return cur.fetchone()[0]
+
+
+@app.get("/api/admin/backup")
+def admin_backup_db(_user: str = Depends(require_admin)):
+    """Export all tables to a .backup file using psycopg2 COPY — no pg_dump needed.
+
+    The file is JSON containing one CSV block per table.  Restore it with
+    POST /api/admin/restore.
+    """
+    import io as _io
+
+    filename = f"aub_library_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.backup"
+    backup: dict = {
+        "version": "2.0",
+        "created": datetime.utcnow().isoformat() + "Z",
+        "tables": {},
+    }
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                for table in _BACKUP_TABLES:
+                    if not _table_exists(cur, table):
+                        logger.info("Backup: skipping missing table '%s'", table)
+                        continue
+                    buf = _io.StringIO()
+                    cur.copy_expert(
+                        f"COPY {table} TO STDOUT WITH (FORMAT CSV, HEADER)", buf
+                    )
+                    backup["tables"][table] = buf.getvalue()
+                    row_count = backup["tables"][table].count("\n") - 1
+                    logger.info("Backup: exported %s (%d rows)", table, max(row_count, 0))
+    except Exception as e:
+        logger.error("Backup failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Backup error: {e}")
+
+    payload = _json.dumps(backup, ensure_ascii=False).encode("utf-8")
+    logger.info("Backup created: %d bytes, file=%s", len(payload), filename)
+
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Backup-Size-Bytes": str(len(payload)),
+        },
+    )
+
+
+@app.post("/api/admin/restore")
+async def admin_restore_db(
+    file: UploadFile = File(...),
+    _user: str = Depends(require_admin),
+):
+    """Restore the database from a .backup file produced by POST /api/admin/backup.
+
+    DESTRUCTIVE: truncates every backed-up table and replaces it with the
+    backup contents.  The server resets its in-memory state automatically.
+    """
+    import io as _io
+
+    fname = (file.filename or "").lower()
+    if not fname.endswith(".backup"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only .backup files exported by this dashboard are accepted.",
+        )
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    try:
+        backup = _json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="File is not valid JSON — is it a .backup file?")
+
+    if backup.get("version") not in ("2.0",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported backup version '{backup.get('version')}'. "
+                   "Only backups created by this dashboard are accepted.",
+        )
+
+    tables_data: dict = backup.get("tables", {})
+    if not tables_data:
+        raise HTTPException(status_code=400, detail="Backup file contains no table data.")
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Truncate in reverse FK order so constraints don't fire
+                for table in reversed(_BACKUP_TABLES):
+                    if table in tables_data and _table_exists(cur, table):
+                        cur.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE")
+
+                # Restore in FK-safe order
+                for table in _BACKUP_TABLES:
+                    csv_data = tables_data.get(table)
+                    if not csv_data:
+                        continue
+                    if not _table_exists(cur, table):
+                        logger.warning("Restore: table '%s' not in schema, skipping", table)
+                        continue
+                    buf = _io.StringIO(csv_data)
+                    cur.copy_expert(
+                        f"COPY {table} FROM STDIN WITH (FORMAT CSV, HEADER)", buf
+                    )
+                    logger.info("Restore: loaded %s", table)
+
+            conn.commit()
+    except Exception as e:
+        logger.error("Restore failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Restore error: {e}")
+
+    # Reset in-memory state so the app picks up the restored data
+    global _chatbot, _admin_manager
+    if _chatbot is not None:
+        _chatbot.clear_cache()
+    _chatbot = None
+    _admin_manager = None
+    logger.info("Database restored from %s (%d bytes). In-memory state reset.", file.filename, len(raw))
+
+    return {
+        "status": "ok",
+        "message": "Database restored successfully. All in-memory caches have been reset.",
+        "file": file.filename,
+        "size_bytes": len(raw),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Admin endpoints -- Rescrape library website
 # ---------------------------------------------------------------------------
 
 def _run_scrape():
     """Background task: scrape AUB library website and rebuild library_pages."""
-    global _chatbot, _admin_manager, _scrape_status
+    global _chatbot, _admin_manager
     try:
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts"))
         from scrape_aub_library import AUBLibraryScraper, \
             START_URLS, ALLOWED_DOMAIN, ALLOWED_PATHS, MAX_PAGES
 
-        _scrape_status["message"] = "Crawling AUB library website..."
-        _scrape_status["pages_scraped"] = 0
+        _set_scrape_status(message="Crawling AUB library website...", pages_scraped=0)
 
         scraper = AUBLibraryScraper(
             start_urls=START_URLS,
@@ -873,15 +1090,19 @@ def _run_scrape():
             allowed_paths=ALLOWED_PATHS,
         )
         scraped_data = scraper.crawl(max_pages=MAX_PAGES)
-        _scrape_status["pages_scraped"] = len(scraped_data)
+        _set_scrape_status(pages_scraped=len(scraped_data))
 
         if not scraped_data:
-            _scrape_status["message"] = "No pages scraped."
-            _scrape_status["error"] = "Scraper returned no data."
-            _scrape_status["running"] = False
+            _set_scrape_status(
+                message="No pages scraped.",
+                error="Scraper returned no data.",
+                running=False,
+            )
             return
 
-        _scrape_status["message"] = f"Processing {len(scraped_data)} pages through pipeline..."
+        _set_scrape_status(
+            message=f"Processing {len(scraped_data)} pages through pipeline...",
+        )
         count = IndexBuilder.build_chunks_from_scraped(scraped_data)
 
         # Reset singletons so they pick up fresh data
@@ -891,30 +1112,32 @@ def _run_scrape():
         _admin_manager = None
 
         set_last_scrape_time()
-        _scrape_status["message"] = f"Scraping complete. {count} chunks indexed from {len(scraped_data)} pages."
-        _scrape_status["error"] = None
+        _set_scrape_status(
+            message=f"Scraping complete. {count} chunks indexed from {len(scraped_data)} pages.",
+            error=None,
+        )
         logger.info(f"Rescrape complete: {count} library pages indexed.")
     except Exception as e:
         logger.error(f"Rescrape failed: {e}")
-        _scrape_status["message"] = "Scraping failed."
-        _scrape_status["error"] = str(e)
+        _set_scrape_status(message="Scraping failed.", error=str(e))
     finally:
-        _scrape_status["running"] = False
+        _set_scrape_status(running=False)
 
 
 @app.post("/api/admin/rescrape")
 def admin_rescrape():
     """Trigger a background rescrape of the AUB library website."""
-    global _scrape_status
-    if _scrape_status["running"]:
-        raise HTTPException(status_code=409, detail="A scrape is already in progress.")
-
-    _scrape_status = {
-        "running": True,
-        "message": "Starting scrape...",
-        "pages_scraped": 0,
-        "error": None,
-    }
+    # Atomically claim the scrape slot under the lock so two concurrent
+    # callers can't both start a scrape after seeing running=False.
+    with _scrape_status_lock:
+        if _scrape_status["running"]:
+            raise HTTPException(status_code=409, detail="A scrape is already in progress.")
+        _scrape_status.update({
+            "running": True,
+            "message": "Starting scrape...",
+            "pages_scraped": 0,
+            "error": None,
+        })
     thread = threading.Thread(target=_run_scrape, daemon=True)
     thread.start()
     return {"status": "started", "message": "Scraping started in background."}
@@ -923,7 +1146,7 @@ def admin_rescrape():
 @app.get("/api/admin/rescrape/status")
 def admin_rescrape_status():
     """Check the status of a running or completed scrape."""
-    return _scrape_status
+    return _get_scrape_status()
 
 
 # ---------------------------------------------------------------------------

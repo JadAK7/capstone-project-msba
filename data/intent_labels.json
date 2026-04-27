@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "created": "2026-04-23",
+  "description": "Labeled intent classification set. Each entry has a query and the ground-truth intent label (database, hours, contact, faq, general). Used by scripts/eval_intent.py to measure regex-based intent classifier accuracy.",
+  "intent_labels": ["database", "hours", "contact", "faq", "general"],
+  "questions": [
+    {"id": "int_db_01", "intent": "database", "lang": "en", "query": "Which database should I use for engineering research?"},
+    {"id": "int_db_02", "intent": "database", "lang": "en", "query": "Recommend a good database for medicine."},
+    {"id": "int_db_03", "intent": "database", "lang": "en", "query": "Where can I find peer-reviewed articles about climate change?"},
+    {"id": "int_db_04", "intent": "database", "lang": "en", "query": "I need to search for scholarly papers on finance."},
+    {"id": "int_db_05", "intent": "database", "lang": "en", "query": "What is the best source for a literature review in psychology?"},
+    {"id": "int_db_06", "intent": "database", "lang": "en", "query": "Does AUB subscribe to Scopus?"},
+    {"id": "int_db_07", "intent": "database", "lang": "en", "query": "Which e-resource has clinical trials?"},
+    {"id": "int_db_08", "intent": "database", "lang": "en", "query": "I'm looking for journal articles on architecture."},
+    {"id": "int_db_ar_01", "intent": "database", "lang": "ar", "query": "ما هي أفضل قاعدة بيانات للبحث في الطب؟"},
+    {"id": "int_db_ar_02", "intent": "database", "lang": "ar", "query": "أين أبحث عن مقالات علمية في الهندسة؟"},
+
+    {"id": "int_hr_01", "intent": "hours", "lang": "en", "query": "What are the library hours today?"},
+    {"id": "int_hr_02", "intent": "hours", "lang": "en", "query": "When does Jafet close on Saturdays?"},
+    {"id": "int_hr_03", "intent": "hours", "lang": "en", "query": "Is the library open on Sundays?"},
+    {"id": "int_hr_04", "intent": "hours", "lang": "en", "query": "What time does the library open tomorrow?"},
+    {"id": "int_hr_05", "intent": "hours", "lang": "en", "query": "Opening schedule during exam period?"},
+    {"id": "int_hr_06", "intent": "hours", "lang": "en", "query": "Library timing during Ramadan?"},
+
+    {"id": "int_ct_01", "intent": "contact", "lang": "en", "query": "Who do I contact for help with reference materials?"},
+    {"id": "int_ct_02", "intent": "contact", "lang": "en", "query": "Email of the circulation desk?"},
+    {"id": "int_ct_03", "intent": "contact", "lang": "en", "query": "Where is the medical library located?"},
+    {"id": "int_ct_04", "intent": "contact", "lang": "en", "query": "How can I reach a librarian for research help?"},
+    {"id": "int_ct_05", "intent": "contact", "lang": "en", "query": "On which floor are the archives?"},
+
+    {"id": "int_faq_01", "intent": "faq", "lang": "en", "query": "How do I renew a borrowed book?"},
+    {"id": "int_faq_02", "intent": "faq", "lang": "en", "query": "What is the overdue fine policy?"},
+    {"id": "int_faq_03", "intent": "faq", "lang": "en", "query": "Can I print from the library?"},
+    {"id": "int_faq_04", "intent": "faq", "lang": "en", "query": "Is there wifi in the library?"},
+    {"id": "int_faq_05", "intent": "faq", "lang": "en", "query": "How do I get a library card?"},
+    {"id": "int_faq_06", "intent": "faq", "lang": "en", "query": "Can I access the library as an alum?"},
+    {"id": "int_faq_07", "intent": "faq", "lang": "en", "query": "What is the loan period for graduate students?"},
+    {"id": "int_faq_08", "intent": "faq", "lang": "en", "query": "Am I allowed to bring food into the library?"},
+    {"id": "int_faq_09", "intent": "faq", "lang": "en", "query": "Do you have group study rooms?"},
+
+    {"id": "int_gen_01", "intent": "general", "lang": "en", "query": "Tell me about the library."},
+    {"id": "int_gen_02", "intent": "general", "lang": "en", "query": "What services are available?"},
+    {"id": "int_gen_03", "intent": "general", "lang": "en", "query": "Library"},
+    {"id": "int_gen_04", "intent": "general", "lang": "en", "query": "hi"},
+    {"id": "int_gen_05", "intent": "general", "lang": "en", "query": "Give me an overview of AUB library."},
+    {"id": "int_gen_06", "intent": "general", "lang": "en", "query": "What else do you offer?"}
+  ]
+}

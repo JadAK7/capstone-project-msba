@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "created": "2026-04-23",
+  "description": "Labeled query pairs for evaluating the admin feedback similarity threshold (0.85). Each pair has a `relation` label: 'same' means the two queries should reuse the same admin correction; 'similar' means they are topically related but ask a different sub-question so the correction should NOT transfer; 'different' means the topic is unrelated. Used by scripts/eval_feedback_similarity.py to derive the optimal threshold.",
+  "labels": ["same", "similar", "different"],
+  "pairs": [
+    {"id": "fb_sa_01", "relation": "same", "a": "What are the library hours today?",               "b": "What time does the library open today?"},
+    {"id": "fb_sa_02", "relation": "same", "a": "How do I renew a book online?",                    "b": "Can you tell me how to renew my book through the catalog?"},
+    {"id": "fb_sa_03", "relation": "same", "a": "Is the library open on Sundays?",                  "b": "Does the library operate on Sundays?"},
+    {"id": "fb_sa_04", "relation": "same", "a": "How many books can a graduate student borrow?",    "b": "What is the borrowing limit for graduate students?"},
+    {"id": "fb_sa_05", "relation": "same", "a": "What is the late fee for overdue books?",          "b": "How much is the fine for returning a book late?"},
+    {"id": "fb_sa_06", "relation": "same", "a": "Can I access databases off-campus?",               "b": "Is it possible to use the databases from home?"},
+    {"id": "fb_sa_07", "relation": "same", "a": "Where is the Saab Medical Library located?",       "b": "What is the location of Saab Medical Library?"},
+    {"id": "fb_sa_08", "relation": "same", "a": "How do I get a library card?",                     "b": "How do I obtain my AUB library card?"},
+    {"id": "fb_sa_09", "relation": "same", "a": "Does AUB subscribe to IEEE Xplore?",               "b": "Is IEEE Xplore available through AUB libraries?"},
+    {"id": "fb_sa_10", "relation": "same", "a": "ما هي ساعات عمل المكتبة؟",                         "b": "متى تفتح المكتبة؟"},
+
+    {"id": "fb_si_01", "relation": "similar", "a": "What are the library hours on weekdays?",       "b": "What are the library hours on Saturdays?"},
+    {"id": "fb_si_02", "relation": "similar", "a": "How do I renew a book online?",                 "b": "How do I place a hold on a book?"},
+    {"id": "fb_si_03", "relation": "similar", "a": "What is the borrowing limit for undergraduates?","b": "What is the borrowing limit for graduate students?"},
+    {"id": "fb_si_04", "relation": "similar", "a": "Can I access databases off-campus?",            "b": "Can alumni access databases off-campus?"},
+    {"id": "fb_si_05", "relation": "similar", "a": "Where is Jafet Memorial Library located?",      "b": "Where is the Saab Medical Library located?"},
+    {"id": "fb_si_06", "relation": "similar", "a": "What is the late fee for overdue books?",       "b": "Is there a fee for lost books?"},
+    {"id": "fb_si_07", "relation": "similar", "a": "How do I borrow a book?",                       "b": "How do I return a book?"},
+    {"id": "fb_si_08", "relation": "similar", "a": "Which database is best for engineering?",       "b": "Which database is best for medicine?"},
+    {"id": "fb_si_09", "relation": "similar", "a": "Can I print in the library?",                   "b": "Can I scan documents in the library?"},
+    {"id": "fb_si_10", "relation": "similar", "a": "What services does Jafet offer?",               "b": "What services does the Saab Medical Library offer?"},
+
+    {"id": "fb_df_01", "relation": "different", "a": "What are the library hours today?",           "b": "Which database is best for engineering?"},
+    {"id": "fb_df_02", "relation": "different", "a": "How do I renew a book?",                      "b": "How do I contact IT support?"},
+    {"id": "fb_df_03", "relation": "different", "a": "Is the library open on Sundays?",             "b": "What is the capital of France?"},
+    {"id": "fb_df_04", "relation": "different", "a": "Can I access databases off-campus?",          "b": "What is the best Python library for data analysis?"},
+    {"id": "fb_df_05", "relation": "different", "a": "How do I submit my thesis to ScholarWorks?",  "b": "What is the overdue fine policy?"},
+    {"id": "fb_df_06", "relation": "different", "a": "Where is the medical library located?",       "b": "How do I renew my library card?"},
+    {"id": "fb_df_07", "relation": "different", "a": "Does AUB subscribe to IEEE Xplore?",          "b": "Can I bring food into the library?"},
+    {"id": "fb_df_08", "relation": "different", "a": "What is the loan period for graduate students?","b": "Is there wifi in the library?"},
+    {"id": "fb_df_09", "relation": "different", "a": "How do I print in the library?",              "b": "What are the library hours during Ramadan?"},
+    {"id": "fb_df_10", "relation": "different", "a": "How many floors does Jafet have?",            "b": "Does the library offer interlibrary loan?"}
+  ]
+}

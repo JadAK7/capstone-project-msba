@@ -27,3 +27,12 @@ playwright>=1.40.0
 # Document parsing
 python-docx>=1.1.0
 python-multipart>=0.0.9
+
+# Resilience / retry
+tenacity>=8.2.0
+
+# Evaluation (RAG metrics)
+ragas>=0.1.0
+datasets>=2.14.0
+langchain-openai>=0.1.0
+eval_type_backport>=0.1.0

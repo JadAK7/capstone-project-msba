@@ -1,33 +1,39 @@
 # AUB Libraries Assistant
 
-A bilingual (Arabic & English) RAG-based chatbot that answers library FAQs, provides personalized database recommendations, and serves information scraped from the AUB Libraries website. Built with a React frontend, FastAPI backend, and PostgreSQL + pgvector for vector search.
+A bilingual (Arabic & English) RAG-based chatbot for the American University of Beirut Libraries. Answers FAQs, recommends research databases, and synthesises responses from scraped library website content. Built on a hybrid retrieval pipeline (vector + keyword + RRF), cross-encoder reranking, grounded generation, and post-generation claim verification — all guarded by an injection / scope filter and backed by a feedback loop that lets librarians correct bad answers.
 
 ## Features
 
-- **FAQ Answering** -- Instant answers to common library questions using semantic search
-- **Database Recommendations** -- Suggests relevant research databases based on topic and intent detection
-- **Library Page Retrieval** -- Synthesizes answers from scraped AUB library website content using GPT-4o-mini
-- **Bilingual Support** -- Arabic and English with automatic per-message language detection and RTL rendering
-- **Admin Dashboard** -- Manage collections, view analytics, add/edit/delete entries, trigger re-indexing and re-scraping
-- **Response Caching** -- In-memory TTL+LRU cache for fast repeated queries
-- **Debug Panel** -- Inspect retrieval scores, chosen source, and language detection for each response
+- **Hybrid retrieval** — Dense (pgvector cosine) + sparse (PostgreSQL FTS with phrase/synonym expansion), merged via Reciprocal Rank Fusion
+- **Query rewriting** — LLM-based follow-up resolution, Arabic→English translation for retrieval, expansion of short queries
+- **Cross-encoder reranking** — Local reranker model scores top-K candidates; min-score threshold gates abstention
+- **Multi-source priority** — `custom_notes` (faculty text) > `document_chunks` (scraped pages) > `faq` > `databases`, with trust boosts applied at rerank time
+- **Grounded generation + claim verification** — Inline evidence-plan generation; abstain when context is insufficient; post-hoc verifier strips unsupported claims
+- **Input guards** — Regex + embedding-based prompt-injection detection and out-of-scope filtering
+- **Bilingual** — Per-message Arabic/English detection with RTL rendering; cross-lingual threshold offset for Arabic queries against English-indexed data
+- **Two-tier cache** — In-memory exact-key + semantic similarity (cosine ≥ 0.95) cache, persisted to disk between restarts
+- **Feedback loop** — Admin can correct answers; corrections retrieved by similarity (≥ 0.85) and replayed on near-duplicate questions
+- **Escalations** — Students can hand off questions to a librarian; admins respond from the dashboard
+- **Admin dashboard** — Auth-gated UI for collection CRUD, re-indexing, re-scraping, freshness checks, conversations, feedback, escalations, analytics, and 22 generated charts
+- **Per-stage latency instrumentation** — `StageTimer` records timing for every pipeline stage; surfaced in debug payload and analytics
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Frontend | React 18, react-router-dom, react-markdown |
-| Backend | FastAPI + Uvicorn (Python 3.8+) |
-| Vector DB | PostgreSQL 16 + pgvector (cosine similarity, HNSW indexes) |
-| Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
-| LLM | GPT-4o-mini (library page synthesis, Arabic translation) |
+| Frontend | React 18, react-router-dom, react-markdown, rehype-sanitize |
+| Backend | FastAPI + Uvicorn (Python 3.8+), slowapi rate limiting |
+| Vector DB | PostgreSQL 16 + pgvector (HNSW, cosine), GIN FTS indexes |
+| Embeddings | OpenAI `text-embedding-3-small` (1536-dim), configurable via env |
+| LLM | OpenAI `gpt-4o-mini` (configurable; supports any OpenAI-compatible provider) |
+| Resilience | tenacity retry + per-stage circuit breakers (`backend/llm_client.py`) |
 | Scraping | Playwright (headless Chromium) |
-| Containerization | Docker Compose |
+| Eval | Custom LLM-as-judge metrics + Ragas; orchestrator runs full suite |
 
 ## Prerequisites
 
 - Docker and Docker Compose
-- OpenAI API key ([get one here](https://platform.openai.com/api-keys))
+- An OpenAI API key
 
 For local development without Docker:
 - Python 3.8+
@@ -35,14 +41,14 @@ For local development without Docker:
 
 ## Quick Start (Docker)
 
-The easiest way to run everything with a single command:
-
 ### 1. Configure environment
 
-Create a `.env` file in the project root:
+Create a `.env` file at the project root:
 
 ```
-OPENAI_API_KEY=sk-your-api-key-here
+OPENAI_API_KEY=sk-...
+ADMIN_PASSWORD=your-admin-password   # required to log into the admin dashboard
+DATABASE_URL=postgresql://aub_library:aub_library_pass@db:5432/aub_library
 ```
 
 ### 2. Run
@@ -51,236 +57,287 @@ OPENAI_API_KEY=sk-your-api-key-here
 docker-compose up --build
 ```
 
-This starts PostgreSQL + pgvector and the application (backend + frontend) together. The app is available at `http://localhost:8000`. Embedding indices are built automatically on first startup.
+This starts PostgreSQL + pgvector and the application together. Visit `http://localhost:8000`. Indices are built automatically on first startup.
 
 ## Local Development
 
 ### 1. Install dependencies
 
 ```bash
-# Start PostgreSQL + pgvector
+# PostgreSQL + pgvector (host port 5433 → container port 5432)
 docker-compose up -d db
 
-# Python dependencies
+# Python deps
 pip install -r requirements.txt
 
-# Frontend dependencies
+# Frontend deps
 cd frontend && npm install && cd ..
 ```
 
 ### 2. Configure environment
 
-Create a `.env` file in the project root:
+Create `.env` at project root. For local dev the DB host is `localhost:5433`:
 
 ```
-OPENAI_API_KEY=sk-your-api-key-here
+OPENAI_API_KEY=sk-...
+DATABASE_URL=postgresql://aub_library:aub_library_pass@localhost:5433/aub_library
+ADMIN_PASSWORD=your-admin-password
 ```
 
 ### 3. Build embedding indices
 
-Required before first run, or after CSV source files change:
+Required before first run, and any time CSV source files change:
 
 ```bash
 python scripts/build_index.py
 ```
 
-### 4. Run the application
+### 4. Run
 
-**Development (two terminals):**
+Two terminals (recommended for development):
 
 ```bash
-# Terminal 1: Backend
+# Terminal 1 — backend (auto-builds indices if missing)
 uvicorn backend.main:app --reload --port 8000
 
-# Terminal 2: Frontend (proxies API calls to :8000)
+# Terminal 2 — frontend (proxies API to :8000)
 cd frontend && npm start
 ```
 
-The app opens at `http://localhost:3000`. The backend API is at `http://localhost:8000`.
+App opens at `http://localhost:3000`. API at `http://localhost:8000`.
 
-**Production (single server):**
+Single-server production mode:
 
 ```bash
 cd frontend && npm run build && cd ..
 uvicorn backend.main:app --port 8000
 ```
 
-FastAPI serves the React build and API from the same port.
+FastAPI serves the React build and the API from the same port.
 
-### 5. (Optional) Scrape library website
-
-To populate the library pages table with content from the AUB Libraries website:
+### 5. (Optional) Scrape the library website
 
 ```bash
 python scripts/scrape_aub_library.py
 ```
 
-This requires Playwright browsers (`playwright install chromium`). You can also trigger a re-scrape from the admin dashboard.
+Requires `playwright install chromium` once. Re-scrape can also be triggered from the admin dashboard.
+
+### 6. (Optional) Content freshness check
+
+```bash
+python scripts/freshness_check.py            # check + auto-rescrape if >20% drift
+python scripts/freshness_check.py --dry-run  # check only
+```
+
+### 7. CLI chatbot (no web server)
+
+```bash
+python scripts/chat.py
+```
 
 ## Project Structure
 
 ```
 .
-├── backend/                    # FastAPI application
-│   ├── __init__.py
-│   ├── main.py                 # App entrypoint, API endpoints, startup
-│   ├── chatbot.py              # LibraryChatbot, IntentDetector, LanguageDetector
-│   ├── database.py             # PostgreSQL connection pool, schema init
-│   ├── embeddings.py           # Centralized OpenAI embedding generation
-│   ├── cache.py                # In-memory TTL+LRU response cache
-│   ├── index_builder.py        # IndexBuilder for pgvector tables
-│   ├── admin.py                # AdminManager for CRUD operations
-│   └── analytics.py            # ChatLogger, AnalyticsComputer
-├── frontend/                   # React application
-│   ├── public/
-│   │   └── index.html
+├── backend/                       # FastAPI application
+│   ├── main.py                    # FastAPI app, all 54 endpoints, startup/shutdown
+│   ├── chatbot.py                 # LibraryChatbot orchestrator, LanguageDetector, Config
+│   ├── intent_classifier.py       # Unified intent rules (EN + AR keyword regex)
+│   ├── retriever.py               # Hybrid vector + keyword retrieval + RRF
+│   ├── reranker.py                # LLM-based reranking, source-trust boosts
+│   ├── query_rewriter.py          # Follow-up resolution, AR→EN, expansion
+│   ├── input_guard.py             # Injection detection + domain scope filter
+│   ├── grounding.py               # Answerability classifier + inline-verified generation
+│   ├── verifier.py                # Post-generation claim-level verification
+│   ├── evaluation.py              # RAG metrics (groundedness, faithfulness, etc.)
+│   ├── source_config.py           # Multi-source priority + trust weights
+│   ├── stage_timer.py             # Per-stage latency instrumentation
+│   ├── llm_client.py              # Resilient chat-completion gateway (tenacity + breakers)
+│   ├── embeddings.py              # Centralized embedding generation
+│   ├── cache.py                   # Two-tier (exact + semantic) response cache, disk-persisted
+│   ├── content_extractor.py       # HTML/text → structured documents (replaces scraper_cleaner)
+│   ├── document_parser.py         # .docx → plain text for ingestion
+│   ├── chunker.py                 # Structure-aware semantic chunking
+│   ├── index_builder.py           # CSV + scraped pages → pgvector tables
+│   ├── admin.py                   # AdminManager for CRUD operations
+│   ├── analytics.py               # ChatLogger + AnalyticsComputer
+│   ├── chart_generator.py         # 22 matplotlib charts as base64 PNGs
+│   └── database.py                # psycopg2 ThreadedConnectionPool, schema init
+│
+├── frontend/                      # React application
 │   └── src/
-│       ├── App.js              # Main shell, state, API calls
-│       ├── App.css             # AUB-branded styles (includes RTL)
-│       ├── api.js              # Fetch wrapper for backend API
-│       ├── index.js            # React entry point
-│       ├── LanguageContext.js   # Language state context
-│       ├── i18n.js             # i18n configuration
-│       ├── i18n/               # Translation files (en.js, ar.js)
-│       ├── components/         # Header, Footer, ChatWindow, ChatInput,
-│       │                       #   MessageBubble, DebugPanel
-│       └── pages/
-│           └── AdminDashboard.js
-├── data/                       # Source data files
-│   ├── library_faq_clean.csv   # FAQ source data (question/answer pairs)
-│   └── Databases description.csv  # Database source data (1000+ records)
-├── scripts/                    # Standalone CLI scripts
-│   ├── build_index.py          # Build embedding indices
-│   ├── chat.py                 # CLI chatbot (standalone, bilingual)
-│   └── scrape_aub_library.py   # AUB library website scraper
-├── docker-compose.yml          # PostgreSQL + pgvector + app containers
-├── Dockerfile                  # Multi-stage build (React + Python)
-├── requirements.txt            # Python dependencies
-└── .env                        # API keys (not committed)
+│       ├── App.js                 # Main shell, state, API calls
+│       ├── api.js                 # Fetch wrapper
+│       ├── LanguageContext.js     # Language state context
+│       ├── i18n/                  # en.js, ar.js translation files
+│       ├── components/            # Header, Footer, ChatWindow, ChatInput,
+│       │                          # MessageBubble, DebugPanel, EscalationModal
+│       └── pages/AdminDashboard.js
+│
+├── data/
+│   ├── library_faq_clean.csv      # FAQ source (Q/A pairs)
+│   ├── Databases description.csv  # Database recommendations (1000+ rows)
+│   ├── golden_set.json            # Eval golden questions
+│   ├── ablation_stress_set.json   # Ablation stress questions
+│   ├── feedback_similarity_set.json
+│   ├── guard_redteam_set.json     # Injection / red-team test cases
+│   └── intent_labels.json         # Intent classifier labels
+│
+├── scripts/
+│   ├── build_index.py             # Build all pgvector tables from CSVs + scraped pages
+│   ├── chat.py                    # CLI chatbot (no web server)
+│   ├── scrape_aub_library.py      # Playwright scraper
+│   ├── freshness_check.py         # Live-content drift detection + auto-rescrape
+│   └── eval/                      # Evaluation suite (eval_*, run_*, generate_*, etc.)
+│
+├── docker-compose.yml             # PostgreSQL 16 + pgvector + app
+├── Dockerfile                     # Multi-stage React + Python build
+├── requirements.txt               # Python dependencies
+└── .env                           # Secrets (gitignored)
 ```
 
-**Generated at runtime (not committed):**
-- `chat_logs.json` -- Chat interaction logs for analytics
+**Generated at runtime (gitignored):**
+- `data/.response_cache.pkl` — persisted response cache
+- `eval_run_*/` — evaluation result directories
+- `chat_logs.json` — legacy chat log file (current logs live in the `chat_conversations` table)
 
-## Architecture
+## Pipeline (v3)
 
 ```
-User (React UI or CLI)
+React UI / CLI
     │
-    ▼
-POST /api/chat  { message }
+    ▼  POST /api/chat { message, language?, history? }
+FastAPI
     │
-    ▼
-FastAPI Backend
+    ├── 1. Input guards (regex + embedding injection detection, scope filter)
+    ├── 2. Query rewriting  (LLM: follow-up resolution, AR→EN, expansion)
+    ├──────────  Cache lookup (exact key, then semantic ≥ 0.95)
+    │            HIT → return immediately
+    ├──── MISS:
+    │       ├── Admin-feedback correction lookup (pgvector ≥ 0.85)
+    │       │   FOUND → use corrected answer (re-rendered by LLM)
+    │       └── NOT FOUND:
+    │             ├── 3. Intent classification → table / page_type pre-filter
+    │             ├── 4. Hybrid retrieval per source
+    │             │      • Vector: single embedding reused across tables
+    │             │      • Keyword: phraseto_tsquery (×2 boost) + plainto_tsquery + synonyms
+    │             │      • RRF merge (65% vector / 35% keyword) — pure quality, no trust bias
+    │             ├── 5. Cross-encoder rerank + source-trust boost
+    │             │      Dedup (Jaccard 0.85) → top 15 → score → min_score gate
+    │             ├── 6. Sufficiency check (top-score gates: confident / partial / abstain)
+    │             ├── 7. Grounded generation (uses ORIGINAL query for user language)
+    │             │      System prompt: role-locked, self-check, cite-or-remove
+    │             │      temperature=0.0, top_p=0.85
+    │             └── 8. Claim verification (LLM strict + regex safety, fail-safe fallback)
     │
-    ├─── Response Cache (in-memory TTL+LRU)
-    │    ├── HIT  → return cached answer immediately
-    │    └── MISS → continue to retrieval pipeline
-    │
-    ├─── pgvector Query (cosine similarity via HNSW indexes)
-    │    ├── faq table              (question text)
-    │    ├── databases table        (name + description)
-    │    └── library_pages table    (title + content)
-    │
-    ├─── Intent Detection (keyword regex, bilingual)
-    │
-    ├─── Language Detection
-    │    (auto-detect from query text per message)
-    │
-    └─── Response Router
-         ├── Database intent detected → DB recommendations
-         ├── Library pages match      → GPT-4o-mini synthesis
-         ├── FAQ match                → Direct answer
-         ├── DB semantic match        → DB recommendations
-         └── No match                 → Clarification prompt
-    │
-    ▼
-JSON { answer, debug, detected_language }
-    │
-    ▼
+    └─→  Cache store, log conversation
+        │
+        ▼  JSON { answer, debug, detected_language, conversation_id }
 React renders markdown (RTL for Arabic)
 ```
 
 ## API Endpoints
 
-### Chat
+### Public
+
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/chat` | Send message, get answer + debug info |
-| `GET` | `/api/health` | Backend status and collection counts |
-| `GET` | `/api/status` | Check if indices exist |
+| `POST` | `/api/feedback` | Submit feedback on a conversation |
+| `POST` | `/api/escalate` | Student hands off question to a librarian |
+| `GET`  | `/api/health` | Status + collection counts |
+| `GET`  | `/api/status` | Whether indices exist |
 
-### Admin
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/admin/collections` | List collections with counts |
-| `GET` | `/api/admin/collections/{name}/entries` | Paginated collection entries |
-| `POST` | `/api/admin/faq` | Add FAQ entry |
-| `PUT` | `/api/admin/faq/{id}` | Update FAQ entry |
-| `DELETE` | `/api/admin/faq/{id}` | Delete FAQ entry |
-| `POST` | `/api/admin/database` | Add database entry |
-| `PUT` | `/api/admin/database/{id}` | Update database entry |
-| `DELETE` | `/api/admin/database/{id}` | Delete database entry |
-| `DELETE` | `/api/admin/library-page/{id}` | Delete library page entry |
-| `POST` | `/api/admin/reindex` | Rebuild all indices from CSV sources |
-| `POST` | `/api/admin/rescrape` | Trigger background library website scrape |
-| `GET` | `/api/admin/rescrape/status` | Check scrape progress |
-| `GET` | `/api/admin/system-info` | System information |
-| `GET` | `/api/admin/cache-stats` | Response cache statistics |
-| `GET` | `/api/admin/analytics/summary` | Analytics summary |
-| `GET` | `/api/admin/analytics/trends` | Daily conversation trends (30 days) |
-| `GET` | `/api/admin/analytics/top-queries` | Most frequent queries |
-| `GET` | `/api/admin/analytics/unanswered-queries` | Questions the bot could not answer |
+### Admin (auth-required, under `/api/admin/`)
+
+Authentication: `POST /api/admin/login` returns a bearer token; all admin routes require `Authorization: Bearer <token>`.
+
+Collections & ingest: `collections`, `collections/{name}/entries`, `faq` (CRUD), `database` (CRUD), `custom-note` (CRUD), `documents/upload`, `documents`, `document-chunks/search`, `document-chunk/{id}` (DELETE), `library-page/{id}` (DELETE), `reindex`, `rescrape`, `rescrape/status`, `freshness-check`, `freshness-status`, `system-info`, `cache-stats`, `clear-cache`, `backup`, `restore`.
+
+Conversations & feedback: `conversations`, `conversations/{id}`, `feedback`, `feedback/all`, `feedback/{id}`, `feedback/stats`.
+
+Analytics: `analytics/summary`, `analytics/trends`, `analytics/top-queries`, `analytics/unanswered-queries`, `analytics/latency`, `analytics/charts`.
+
+Evaluation: `evaluation/run`, `evaluation/single`.
+
+Escalations: `escalations`, `escalations/{id}` (DELETE).
+
+54 endpoints in total — see `backend/main.py` for canonical definitions.
 
 ## Configuration
 
-### Environment Variables
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `OPENAI_API_KEY` | Yes | -- | OpenAI API key |
-| `DATABASE_URL` | No | `postgresql://aub_library:aub_library_pass@localhost:5432/aub_library` | PostgreSQL connection string |
+### Required environment variables
 
-### Confidence Thresholds
-
-Defined in `backend/chatbot.py` (`Config` class):
-
-| Threshold | Default | Purpose |
+| Variable | Default | Notes |
 |---|---|---|
-| `FAQ_HIGH_CONFIDENCE` | 0.70 | High-confidence FAQ match |
-| `FAQ_MIN_CONFIDENCE` | 0.60 | Minimum FAQ relevance |
-| `DB_MIN_CONFIDENCE` | 0.45 | Minimum database relevance |
-| `LIBRARY_MIN_CONFIDENCE` | 0.35 | Minimum library page relevance |
+| `OPENAI_API_KEY` | — | Required |
+| `ADMIN_PASSWORD` | — | Required to use the admin dashboard |
+| `DATABASE_URL` | `postgresql://aub_library:aub_library_pass@localhost:5433/aub_library` | host port 5433 (Docker maps `5433:5432`) |
 
-### PostgreSQL Tables (pgvector)
+### Optional
 
-| Table | Embedded Text | Metadata Columns |
+| Variable | Default | Purpose |
 |---|---|---|
-| `faq` | question text | `question`, `answer` |
-| `databases` | `"{name}. {description}"` | `name`, `description` |
-| `library_pages` | `"{title}\n\n{content}"` | `url`, `title`, `content` |
+| `ADMIN_USERNAME` | `admin` | |
+| `ADMIN_TOKEN_SECRET` | random per-process | Set explicitly to keep tokens valid across restarts |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | `text-embedding-3-large` (3072-dim) is also supported; schema auto-resizes |
+| `OPENAI_CHAT_MODEL` | `gpt-4o-mini` | Any OpenAI-compatible model |
+| `LLM_BASE_URL` | (OpenAI) | Point at Groq, Together, Ollama, OpenRouter, Azure, etc. |
+| `LLM_API_KEY` | falls back to `OPENAI_API_KEY` | Provider key if `LLM_BASE_URL` is set |
 
-All tables have HNSW indexes on the `embedding vector(1536)` column using `vector_cosine_ops`.
+### PostgreSQL tables
 
-## Rebuilding Indices
+| Table | Embedded text | Notes |
+|---|---|---|
+| `faq` | question + answer | FAQ pairs from CSV |
+| `databases` | `"{name}. {description}"` | Database recommendations |
+| `library_pages` | `"{title}\n\n{content}"` | Whole pages from scraper |
+| `document_chunks` | chunk_text | Semantic chunks (preferred over `library_pages` for retrieval) |
+| `custom_notes` | `"{label}\n\n{content}"` | Faculty-authored highest-trust source |
+| `chat_conversations` | — | Logged chat turns (with retrieved chunks JSONB) |
+| `chat_feedback` | — | Admin/student feedback, with embedding for similarity lookup |
+| `escalations` | — | Librarian hand-off requests |
 
-After updating CSV source files in `data/`:
+All embedding tables have HNSW indexes (`vector_cosine_ops`) and GIN indexes for full-text search.
+
+### Confidence thresholds
+
+Defined in `backend/chatbot.py` (`Config` class) and `backend/source_config.py`. Top-level retrieval gating now happens at the rerank stage, not at these per-collection scores — see `backend/reranker.py` for the active min-score logic.
+
+## Rebuilding indices
+
+After CSV / scraped content updates:
 
 ```bash
 python scripts/build_index.py
 ```
 
-Or use the admin dashboard's "Re-index All Collections" button.
+Or click "Re-index All Collections" in the admin dashboard. Re-indexing also clears the response cache.
 
-## Cost Estimation
+## Evaluation
 
-Using `text-embedding-3-small` (~$0.02 per 1M tokens):
-- Average query embedding: ~50 tokens
-- Cost per query: approximately $0.000001
+The eval suite lives under `scripts/eval/`. Most common entry points:
 
-GPT-4o-mini is used only for library page synthesis and Arabic translation, adding minimal cost per relevant query.
+```bash
+# Full suite — produces an eval_run_<timestamp>/ directory
+python scripts/eval/run_all_evals.py
 
-Monitor usage at: https://platform.openai.com/usage
+# Faster subset
+python scripts/eval/run_all_evals.py --quick
+
+# Specific evals only
+python scripts/eval/run_all_evals.py --only golden baselines threshold
+
+# Just the curated golden set
+python scripts/eval/run_golden_eval.py
+
+# Ablation study (disable one stage at a time)
+python scripts/eval/run_ablation.py
+```
+
+Individual eval scripts in `scripts/eval/eval_*.py` are runnable on their own and accept `--output <path>`.
 
 ## License
 
-This project is part of a capstone project at the American University of Beirut.
+Capstone project at the American University of Beirut.

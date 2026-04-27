@@ -298,10 +298,15 @@ def _reciprocal_rank_fusion(
     vector_results: List[dict],
     keyword_results: List[dict],
     k: int = 60,
-    vector_weight: float = 0.65,
-    keyword_weight: float = 0.35,
+    vector_weight: float = 1.0,
+    keyword_weight: float = 0.0,
 ) -> List[dict]:
-    """Merge vector and keyword results using weighted Reciprocal Rank Fusion."""
+    """Merge vector and keyword results using weighted Reciprocal Rank Fusion.
+
+    Default weights disable the BM25 contribution: evaluation showed BM25 added
+    zero new top-5 documents across 15 proper-noun-heavy queries, and vector-only
+    matched or beat every hybrid weight on grounding_score. See bm25_decision.json.
+    """
     scores = defaultdict(lambda: {
         "rrf_score": 0.0, "vector_score": 0.0, "keyword_score": 0.0, "metadata": {},
     })

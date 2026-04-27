@@ -1,0 +1,415 @@
+{
+  "description": "Reference (ground-truth) answers for Ragas answer_correctness. FAQ and database rows are pre-drafted from source CSVs; please tighten to 1-2 sentences if long. Policy, follow-up, and Arabic rows require you to fill in reference_answer. For Arabic rows that are translations of EN peers (see peer_en_id), the easiest path is to write the EN reference first, then translate. When done, run: python scripts/merge_reference_answers.py",
+  "summary": {
+    "total": 25,
+    "prefilled": 15,
+    "needs_user_input": 10,
+    "by_category": {
+      "faq_direct": {
+        "total": 10,
+        "prefilled": 10
+      },
+      "database_recommendation": {
+        "total": 5,
+        "prefilled": 5
+      },
+      "policy_hours": {
+        "total": 5,
+        "prefilled": 0
+      },
+      "arabic": {
+        "total": 5,
+        "prefilled": 0
+      }
+    }
+  },
+  "references": [
+    {
+      "id": "faq_001",
+      "question": "How can I reserve a book that is currently checked out?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "catalog",
+        "hold",
+        "reserve",
+        "on-loan"
+      ],
+      "notes": "Direct FAQ match. Source: FAQ id 1 – reserving a checked-out item.",
+      "reference_answer": "If a book is checked out (on-loan), you can reserve it through the Library Catalog by searching for the item and clicking Hold on its record.",
+      "source_span": "Only if the needed book/DVD/video is checked out (on-loan), you may reserve it through the Library Catalog.\nTo reserve a book/DVD/video please follow the below steps:\nSearch for the needed item in the Library Catalog\nIf the item is on-loan (DUE_date), click on the top left: Hold this item\nYou will be prompted to enter your username and password to access your personal library account.\nOnce logged in, select again the item, and choose the location you want to pick it from, and click on \"Request S",
+      "source_match_score": 0.638,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_002",
+      "question": "Can I print, scan, and photocopy documents in the library?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "print",
+        "scan",
+        "photocopy",
+        "library"
+      ],
+      "notes": "Direct FAQ match. Source: FAQ on printing services.",
+      "reference_answer": "Yes; printing, scanning, and photocopying are available in the libraries for active AUBnet users who have a funded printing quota.",
+      "source_span": "To use the network printers, scanners or the photocopiers in the libraries, you should be an active AUBnet user (registered user) and have a printing/copying/scanning quota with sufficient funds.\nFor additional information, please follow this link.",
+      "source_match_score": 0.991,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_003",
+      "question": "How do I renew my borrowed books?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "renew",
+        "library catalog",
+        "online",
+        "phone"
+      ],
+      "notes": "Direct FAQ match. Source: FAQ on renewals.",
+      "reference_answer": "You can renew borrowed books online through My Library Account (using AUBnet credentials) or in person at the Circulation Desk, after clearing any outstanding fines.",
+      "source_span": "You are responsible for renewing your materials, in person, at the Circulation Desk in the libraries or online, after clearing any outstanding fines and overdue items.\nFor Online Renewal go to My Library Account enter your AUBnet account and password (email account/password).​​ You can only renew online twice.\nF​​or more details on renewals, ​​​​​​​​​​recall, and lost or damaged items​ check here, or contact the Circulation desk at ext. 2618 or send an email to libcirc@aub.edu.lb.",
+      "source_match_score": 0.875,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_004",
+      "question": "Can AUB alumni use the university libraries?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "alumni",
+        "library",
+        "access"
+      ],
+      "notes": "Direct FAQ match. Alumni access policy.",
+      "reference_answer": "AUB alumni may use library resources inside the library, and must obtain an alumni card to borrow materials.",
+      "source_span": "AUB alumni are welcome to use the library resources inside the library. To borrow library resources, AUB alumni should obtain a card.\nFor more details check the following link or contact the Access Services Librarian's office, Ms. Carla Chalhoub by phone Tel. 01350 000 (ext. 2619),or email: cc05@aub.edu.lb.",
+      "source_match_score": 0.805,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_005",
+      "question": "Are there fines for overdue library materials?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "fine",
+        "overdue",
+        "fee"
+      ],
+      "notes": "Direct FAQ match. Source: fines/late fees FAQ.",
+      "reference_answer": "Overdue fines are $1 per day per item, and unpaid fines trigger up to three email notices before being added to your Statement of Fees or payroll deduction.",
+      "source_span": "Overdue fines are 1$ per day for any library item.\nFor any unpaid fine, you will receive up to three email notices from the library until fines are paid. After these notices, if fines are not paid, they:\nwill be added to your Statement of Fees (Student).\nwill be deducted from your salary at the end of the month (Staff).\nIf you have further questions, check the following link:\nhttps://www.aub.edu.lb/Libraries/Services/Pages/Students.aspx (Student)\nhttps://www.aub.edu.lb/Libraries/Services/Pages/F",
+      "source_match_score": 0.747,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_006",
+      "question": "How do I cite my sources using APA format?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "citation",
+        "apa",
+        "reference",
+        "cite"
+      ],
+      "notes": "Direct FAQ match. Citation style guidance.",
+      "reference_answer": "Use the library's How to Cite your Sources research guide, which covers APA and other citation styles, citation tools, and academic integrity.",
+      "source_span": "Kindly access our How to Cite your Sources research guide to learn more about citation, citation styles, auto-citation machines, bibliographic tools, plagiarism and academic integrity.",
+      "source_match_score": 0.746,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_007",
+      "question": "Can I access library databases from off-campus?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "off-campus",
+        "remote",
+        "vpn",
+        "access"
+      ],
+      "notes": "Direct FAQ match. Remote access policy.",
+      "reference_answer": "To access library databases from off-campus, use your AUBnet user ID and password (your AUB email login without the @aub.edu.lb domain).",
+      "source_span": "To access licensed library resources from off-campus, you need a valid AUBnet user ID and password. If you are an active AUB user, your AUBnet account is your email/Internet account (without the @aub.edu.lb).\nFor more information about off-campus access and system configuration please visit the Connect from Off-Campus section.\nIf the problem persists, please contact the Automation Department by phone 01-350000 ext. 2604 or by email: monassi@aub.edu.lb.",
+      "source_match_score": 0.774,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_008",
+      "question": "How do I find previous exam papers?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "exam",
+        "previous",
+        "past",
+        "reserve",
+        "library"
+      ],
+      "notes": "Direct FAQ. Past exam availability.",
+      "reference_answer": "Previous exam papers are posted electronically and can be downloaded from the Library webpage under Resources > Course Reserve by searching the course name.",
+      "source_span": "Previous exams are posted electronically and can be downloaded on and off-campus.\nFrom the Library webpage under Resources, please choose the Course Reserve tab and search for the course name.\nFor example: MATH-201.",
+      "source_match_score": 0.746,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_009",
+      "question": "Can I use my laptop and wireless connection in the libraries?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "laptop",
+        "wireless",
+        "wifi",
+        "internet",
+        "library"
+      ],
+      "notes": "Direct FAQ match. Technology/facilities.",
+      "reference_answer": "Yes; laptops and wireless are available in the libraries, but AUB members must first configure their devices at IT Customer Services or at the IT desk in Jafet Library.",
+      "source_span": "In order to use the wireless network, AUB members (students, faculty and staff) should first configure their laptops/smart phones/tablets at the IT Customer Services Department (Tel: 01-350000 ext. 2260/ by email: IT.SECURITY@aub.edu.lb) or at the IT desk in Jafet Library-computer lab (ext: 2627).\nList of Software available on the Library Computers\nMicrosoft Office 2010 (Word, Excel, PowerPoint, Access, InfoPath, Publisher...)\nQuick time\nRoxio Creator (for CD-DVD copy)\nAdobe Acrobat Reader\nAdobe",
+      "source_match_score": 1.0,
+      "needs_user_review": false
+    },
+    {
+      "id": "faq_010",
+      "question": "How do I get help with my research?",
+      "category": "faq_direct",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "librarian",
+        "reference",
+        "research",
+        "consultation",
+        "help"
+      ],
+      "notes": "Direct FAQ match. Research support services.",
+      "reference_answer": "The library offers reference help via walk-in at the Reference Desk in each branch, via live chat from the library webpage, or by email to a branch librarian.",
+      "source_span": "Reference Services are offered in a variety of ways:\nWalk-in:\nCome to the Reference Desk anytime during Reference hours.\nJafet Library\nEngineering and Architecture Library\nScience and Agriculture Library\nSaab Medical Library\nChat:\nClick on the chat icon from the library webpage to chat with a librarian.\nE-mail:\nSend your questions via Ask a Librarian or by e-mail and we will answer promptly:\nJafet Library: jftref@aub.edu.lb\nScience & Agriculture Library: scilib@aub.edu.lb\nEngineering & Architect",
+      "source_match_score": 1.0,
+      "needs_user_review": false
+    },
+    {
+      "id": "db_001",
+      "question": "Which database should I use to find electrical engineering research papers?",
+      "category": "database_recommendation",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "ieee",
+        "engineering",
+        "database",
+        "research"
+      ],
+      "notes": "Canonical database recommendation. IEEE Xplore is the expected primary answer.",
+      "reference_answer": "Access Engineering: Full-text database providing access to engineering books and reference works.",
+      "source_span": "Access Engineering: Full-text database providing access to engineering books and reference works. It covers various engineering topics (bio, chemical, civil, electrical, petroleum, mechanical...) and comprises interactive graphs and tables, instructional videos, maps, and global engineering news. Date Coverage: Current Note: Adobe's Free Flash player (version 8 or higher) plug-in is required to view all videos. Limitations: 45 users at a time",
+      "source_match_score": 1.0,
+      "needs_user_review": false
+    },
+    {
+      "id": "db_002",
+      "question": "What is the best database for medical and health sciences research?",
+      "category": "database_recommendation",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "pubmed",
+        "medline",
+        "medical",
+        "health",
+        "database"
+      ],
+      "notes": "PubMed/MEDLINE expected. Tests medical subject routing.",
+      "reference_answer": "PubMed/MEDLINE and Scopus are the primary databases for medical and health sciences research at AUB, covering biomedical literature, clinical research, and life sciences.",
+      "source_span": "Animal Health and Production Compendium (AHPC): Published by CAB International, AHPC is an interactive and comprehensive encyclopaedia focusing on animal diseases, their pathogens and vectors, as well as animal husbandry, genetics and nutrition of livestock and poultry species and breeds. This compendium includes datasheets, bibliographic records, images, and a glossary. Availability: Full-text and bibliographic citations Date Coverage: 1700s to present",
+      "source_match_score": 1.0,
+      "needs_user_review": false
+    },
+    {
+      "id": "db_003",
+      "question": "I need to find peer-reviewed articles for my business management thesis.",
+      "category": "database_recommendation",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "business",
+        "management",
+        "database",
+        "journal",
+        "ebsco"
+      ],
+      "notes": "Business databases. EBSCO, ProQuest, etc. expected.",
+      "reference_answer": "EBSCO Business Source / ProQuest ABI/INFORM",
+      "source_span": "Academy of Management: Academy of Management is the leading association for management and organization scholars, publishing nine scholarly journals. Sample journal titles are: the Academy of Management Journal, the Academy of Management Review, and the Academy of Management Discoveries. Availability: Full-text Date Coverage: Current + 1 year",
+      "source_match_score": 1.0,
+      "needs_user_review": false
+    },
+    {
+      "id": "db_004",
+      "question": "Where can I find conference proceedings in computer science?",
+      "category": "database_recommendation",
+      "language": "en",
+      "difficulty": "medium",
+      "expected_keywords": [
+        "acm",
+        "ieee",
+        "computer science",
+        "conference",
+        "proceedings"
+      ],
+      "notes": "ACM DL and IEEE Xplore expected. Tests multi-source DB routing.",
+      "reference_answer": "ACM Digital Library: A collection of full-text articles and bibliographic records covering the field of computing and information technology.",
+      "source_span": "ACM Digital Library: A collection of full-text articles and bibliographic records covering the field of computing and information technology. The database includes the complete collection of ACM's publications, including journals, conference proceedings, magazines, newsletters, and multimedia titles. All journals are accessible from volume one, issue one. Availability: Full-text and bibliographic citations Date Coverage: All from v.1",
+      "source_match_score": 1.0,
+      "needs_user_review": false
+    },
+    {
+      "id": "db_005",
+      "question": "What is Scopus and what subjects does it cover?",
+      "category": "database_recommendation",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "scopus",
+        "citation",
+        "abstract",
+        "multidisciplinary"
+      ],
+      "notes": "Specific database description question. Tests database metadata retrieval.",
+      "reference_answer": "Scopus is a multidisciplinary abstract and citation database covering science, technology, medicine, social sciences, arts, and humanities, with citation tracking and journal impact metrics.",
+      "source_span": "Arabic Citation Index (ACI): Coverage: 2015-present",
+      "source_match_score": 1.0,
+      "needs_user_review": false
+    },
+    {
+      "id": "policy_004",
+      "question": "Can someone who is not an AUB student enter and use the library?",
+      "category": "policy_hours",
+      "language": "en",
+      "difficulty": "medium",
+      "expected_keywords": [
+        "non-aub",
+        "guest",
+        "visitor",
+        "access",
+        "policy"
+      ],
+      "notes": "Guest access policy from scraped pages.",
+      "reference_answer": "Yes, someone who is not an AUB student can enter and use the library by obtaining a library card at the Access Services Librarian's office in Jafet Library.",
+      "source_span": "",
+      "source_match_score": null,
+      "needs_user_review": true
+    },
+    {
+      "id": "policy_005",
+      "question": "What is the borrowing period for books?",
+      "category": "policy_hours",
+      "language": "en",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "borrow",
+        "days",
+        "weeks",
+        "period",
+        "loan"
+      ],
+      "notes": "Borrowing period — policy question with specific numeric answer.",
+      "reference_answer": "The borrowing period for books varies by borrower category: Undergraduates: 4 weeks, Graduates / Executive MBA: 8 weeks, Ph.D. Candidates: 1 semester",
+      "source_span": "",
+      "source_match_score": null,
+      "needs_user_review": true
+    },
+    {
+      "id": "ar_002",
+      "question": "كيف أحجز كتاباً من المكتبة؟",
+      "category": "arabic",
+      "language": "ar",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "حجز",
+        "كتاب",
+        "فهرس",
+        "مكتبة"
+      ],
+      "notes": "Arabic translation of faq_001. Parity test for book reservation.",
+      "reference_answer": "قم بتسجيل الدخول إلى حسابك في المكتبة.ابحث عن الكتاب الذي ترغب في حجزه في كتالوج المكتبة.",
+      "source_span": "",
+      "source_match_score": null,
+      "needs_user_review": true,
+      "peer_en_id": "faq_001"
+    },
+    {
+      "id": "ar_003",
+      "question": "هل هناك غرامات على التأخر في إعادة الكتب؟",
+      "category": "arabic",
+      "language": "ar",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "غرامة",
+        "تأخر",
+        "كتاب",
+        "إعادة"
+      ],
+      "notes": "Arabic translation of faq_005. Parity test for overdue fines.",
+      "reference_answer": "نعم، يتم فرض غرامات على الكتب المستعارة التي لم تُعاد في الوقت المحدد. الغرامة هي 1 دولار أمريكي لكل يوم عن كل كتاب متأخر.",
+      "source_span": "",
+      "source_match_score": null,
+      "needs_user_review": true,
+      "peer_en_id": "faq_005"
+    },
+    {
+      "id": "ar_004",
+      "question": "هل يمكنني الوصول إلى الموارد الإلكترونية من خارج الحرم الجامعي؟",
+      "category": "arabic",
+      "language": "ar",
+      "difficulty": "medium",
+      "expected_keywords": [
+        "وصول",
+        "إلكتروني",
+        "خارج",
+        "vpn"
+      ],
+      "notes": "Arabic translation of faq_007. Parity test for remote access.",
+      "reference_answer": "نعم، يمكنك الوصول إلى الموارد الإلكترونية من خارج الحرم الجامعي. تحتاج إلى إدخال اسم المستخدم وكلمة المرور الخاصة بك في AUBnet",
+      "source_span": "",
+      "source_match_score": null,
+      "needs_user_review": true,
+      "peer_en_id": "faq_007"
+    },
+    {
+      "id": "ar_005",
+      "question": "أفضل قاعدة بيانات للهندسة؟",
+      "category": "arabic",
+      "language": "ar",
+      "difficulty": "easy",
+      "expected_keywords": [
+        "قاعدة",
+        "بيانات",
+        "هندسة"
+      ],
+      "notes": "Arabic translation of db_001. Parity test for engineering DB recommendation.",
+      "reference_answer": "Access Engineering (ثقة: 1.00) قاعدة بيانات نصية كاملة توفر الوصول إلى كتب الهندسة وأعمال المرجع. تغطي مواضيع هندسية متنوعة (حيوية، كيميائية، مدنية، كهربائية، بترولية، ميكانيكية...) وتضم تفاعلات...",
+      "source_span": "",
+      "source_match_score": null,
+      "needs_user_review": true,
+      "peer_en_id": "db_001"
+    }
+  ]
+}

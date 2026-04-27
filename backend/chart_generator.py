@@ -9,6 +9,7 @@ import base64
 import logging
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
+from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -228,3 +229,75 @@ class ChartGenerator:
                     logger.error(f"Chart generation failed for {category}/{key}: {e}")
                     result[category][key] = {"title": title, "image": None}
         return result
+
+
+def generate_latency_chart(mean_latencies_ms: dict, sample_count: int) -> Optional[str]:
+    """Generate a stacked horizontal bar chart of mean per-stage latencies.
+
+    Args:
+        mean_latencies_ms: {stage_name: mean_ms, ...} in display order.
+        sample_count: Number of requests used to compute the averages.
+
+    Returns:
+        Base64-encoded PNG string, or None if data is empty.
+    """
+    if not mean_latencies_ms:
+        return None
+
+    stages = list(mean_latencies_ms.keys())
+    values = [mean_latencies_ms[s] for s in stages]
+    total_ms = sum(values)
+
+    # Stacked horizontal bar: each stage is a segment
+    colors = [
+        "#840132", "#ee3524", "#b5651d", "#2d6a4f",
+        "#457b9d", "#424242", "#6a0572", "#0d6efd", "#198754",
+    ]
+    colors = (colors * 4)[:len(stages)]
+
+    fig, ax = plt.subplots(figsize=(10, 2.8))
+    fig.patch.set_facecolor(BG_WHITE)
+    ax.set_facecolor(BG_WHITE)
+
+    left = 0.0
+    for i, (stage, val, color) in enumerate(zip(stages, values, colors)):
+        bar = ax.barh(0, val, left=left, color=color, height=0.5, label=stage)
+        # Label segment if wide enough (>5% of total)
+        if total_ms > 0 and val / total_ms >= 0.05:
+            ax.text(
+                left + val / 2, 0,
+                f"{val:.0f}ms",
+                ha="center", va="center",
+                fontsize=7, color="white", fontweight="bold",
+            )
+        left += val
+
+    ax.set_xlim(0, total_ms * 1.05)
+    ax.set_yticks([])
+    ax.set_xlabel("Milliseconds (ms)", fontsize=9, color=GRAY)
+    title = f"Mean Pipeline Stage Latency  (n={sample_count}, total≈{total_ms:.0f}ms)"
+    ax.set_title(title, fontsize=12, fontweight="bold", color=GRAY, pad=10)
+
+    # Legend below chart
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.35),
+        ncol=min(len(stages), 5),
+        fontsize=7,
+        frameon=False,
+    )
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_color(LIGHT_GRAY)
+    ax.tick_params(colors=GRAY, labelsize=8)
+
+    try:
+        return _fig_to_base64(fig)
+    except Exception as e:
+        logger.error("Latency chart generation failed: %s", e)
+        plt.close(fig)
+        return None
+
+
