@@ -2,14 +2,16 @@
 chatbot.py
 Core chatbot logic for the FastAPI backend.
 Supports Arabic and English (bilingual).
-Uses hybrid retrieval (vector + keyword), cross-encoder reranking, and grounded generation.
+Uses dense vector retrieval (pgvector cosine), LLM-based reranking, and grounded generation.
+A hybrid (vector + PostgreSQL FTS) RRF scaffold lives in retriever.py but the keyword arm
+is disabled in production (RRF weights vector=1.0, keyword=0.0).
 
 Pipeline v3:
   1. Input guards (injection, scope)
   2. Query rewriting (LLM-based: follow-up resolution, Arabic→English, expansion)
   3. Intent classification → table/page_type pre-filtering
-  4. Hybrid retrieval (vector + keyword with synonyms, phrase matching)
-  5. Cross-encoder reranking (local, no API cost)
+  4. Vector retrieval (hybrid scaffold present but keyword arm disabled)
+  5. LLM-based reranking (gpt-4o-mini, 0–1 relevance score; not a cross-encoder)
   6. Grounded answer generation
   7. Claim verification
 """
@@ -467,8 +469,8 @@ class LibraryChatbot:
         1. Input guards (injection, scope)
         2. Query rewriting (LLM: follow-up resolution, Arabic→English, expansion)
         3. Intent classification → table/page_type pre-filtering
-        4. Hybrid retrieval (vector + keyword with synonyms & phrase matching)
-        5. Cross-encoder reranking (local model, no API cost)
+        4. Vector retrieval (hybrid scaffold present; keyword arm disabled)
+        5. LLM-based reranking (gpt-4o-mini, 0–1 relevance; not a cross-encoder)
         6. Grounded answer generation (uses ORIGINAL query for the user prompt)
         7. Claim verification
         """
@@ -733,7 +735,7 @@ class LibraryChatbot:
                     query_embedding=query_embedding,
                 )
 
-        # --- 5. Cross-encoder reranking (local, no API cost) ---
+        # --- 5. LLM-based reranking (gpt-4o-mini, 0-1 relevance score) ---
         with timer.time("llm_reranking"):
             reranked = rerank(
                 query=rewritten_query,

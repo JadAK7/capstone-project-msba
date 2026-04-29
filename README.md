@@ -1,12 +1,12 @@
 # AUB Libraries Assistant
 
-A bilingual (Arabic & English) RAG-based chatbot for the American University of Beirut Libraries. Answers FAQs, recommends research databases, and synthesises responses from scraped library website content. Built on a hybrid retrieval pipeline (vector + keyword + RRF), cross-encoder reranking, grounded generation, and post-generation claim verification — all guarded by an injection / scope filter and backed by a feedback loop that lets librarians correct bad answers.
+A bilingual (Arabic & English) RAG-based chatbot for the American University of Beirut Libraries. Answers FAQs, recommends research databases, and synthesises responses from scraped library website content. Built on dense vector retrieval (pgvector cosine), LLM-based reranking (`gpt-4o-mini` relevance scoring), grounded generation, and post-generation claim verification — all guarded by an injection / scope filter and backed by a feedback loop that lets librarians correct bad answers.
 
 ## Features
 
-- **Hybrid retrieval** — Dense (pgvector cosine) + sparse (PostgreSQL FTS with phrase/synonym expansion), merged via Reciprocal Rank Fusion
+- **Dense retrieval** — pgvector cosine over OpenAI `text-embedding-3-small` (1536-dim) with HNSW indexes. A hybrid scaffold (PostgreSQL FTS keyword path + Reciprocal Rank Fusion) is implemented but disabled in production after ablation showed no top-5 lift; see `backend/retriever.py`.
 - **Query rewriting** — LLM-based follow-up resolution, Arabic→English translation for retrieval, expansion of short queries
-- **Cross-encoder reranking** — Local reranker model scores top-K candidates; min-score threshold gates abstention
+- **LLM-based reranking** — `gpt-4o-mini` scores top-K candidates 0–1 for relevance (not a transformer cross-encoder); min-score threshold gates abstention
 - **Multi-source priority** — `custom_notes` (faculty text) > `document_chunks` (scraped pages) > `faq` > `databases`, with trust boosts applied at rerank time
 - **Grounded generation + claim verification** — Inline evidence-plan generation; abstain when context is insufficient; post-hoc verifier strips unsupported claims
 - **Input guards** — Regex + embedding-based prompt-injection detection and out-of-scope filtering
@@ -27,7 +27,7 @@ A bilingual (Arabic & English) RAG-based chatbot for the American University of 
 | Embeddings | OpenAI `text-embedding-3-small` (1536-dim), configurable via env |
 | LLM | OpenAI `gpt-4o-mini` (configurable; supports any OpenAI-compatible provider) |
 | Resilience | tenacity retry + per-stage circuit breakers (`backend/llm_client.py`) |
-| Scraping | Playwright (headless Chromium) |
+| Scraping | requests + BeautifulSoup (static HTML) |
 | Eval | Custom LLM-as-judge metrics + Ragas; orchestrator runs full suite |
 
 ## Prerequisites
@@ -121,7 +121,7 @@ FastAPI serves the React build and the API from the same port.
 python scripts/scrape_aub_library.py
 ```
 
-Requires `playwright install chromium` once. Re-scrape can also be triggered from the admin dashboard.
+Re-scrape can also be triggered from the admin dashboard. Note: this is a static scraper — JS-rendered content (e.g. live opening hours) won't be captured; maintain those as FAQ entries or `custom_notes`.
 
 ### 6. (Optional) Content freshness check
 
@@ -187,7 +187,7 @@ python scripts/chat.py
 ├── scripts/
 │   ├── build_index.py             # Build all pgvector tables from CSVs + scraped pages
 │   ├── chat.py                    # CLI chatbot (no web server)
-│   ├── scrape_aub_library.py      # Playwright scraper
+│   ├── scrape_aub_library.py      # Static HTML scraper (requests + BeautifulSoup)
 │   ├── freshness_check.py         # Live-content drift detection + auto-rescrape
 │   └── eval/                      # Evaluation suite (eval_*, run_*, generate_*, etc.)
 │
@@ -219,11 +219,11 @@ FastAPI
     │       │   FOUND → use corrected answer (re-rendered by LLM)
     │       └── NOT FOUND:
     │             ├── 3. Intent classification → table / page_type pre-filter
-    │             ├── 4. Hybrid retrieval per source
-    │             │      • Vector: single embedding reused across tables
-    │             │      • Keyword: phraseto_tsquery (×2 boost) + plainto_tsquery + synonyms
-    │             │      • RRF merge (65% vector / 35% keyword) — pure quality, no trust bias
-    │             ├── 5. Cross-encoder rerank + source-trust boost
+    │             ├── 4. Retrieval per source
+    │             │      • Vector: single embedding reused across tables (pgvector cosine, HNSW)
+    │             │      • Keyword path (PostgreSQL FTS + RRF) implemented but DISABLED
+    │             │        (RRF weights vector=1.0, keyword=0.0; ablation showed no top-5 lift)
+    │             ├── 5. LLM rerank (gpt-4o-mini, 0–1 relevance) + source-trust boost
     │             │      Dedup (Jaccard 0.85) → top 15 → score → min_score gate
     │             ├── 6. Sufficiency check (top-score gates: confident / partial / abstain)
     │             ├── 7. Grounded generation (uses ORIGINAL query for user language)
