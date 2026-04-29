@@ -142,6 +142,7 @@ class ResponseCache:
         self,
         query_embedding: List[float],
         language: str,
+        threshold_override: Optional[float] = None,
     ) -> Optional[Any]:
         """Look up a cached response by semantic similarity.
 
@@ -156,12 +157,21 @@ class ResponseCache:
         Args:
             query_embedding: The embedding vector of the query.
             language: Language code to match (only compares within same language).
+            threshold_override: Optional similarity threshold override.
+                Use a lower value (e.g., 0.92) for short queries where small
+                wording differences cause outsized cosine drops.
 
         Returns:
             The cached value (answer, debug) if a semantic match is found, else None.
         """
         if not query_embedding or not self._store:
             return None
+
+        threshold = (
+            threshold_override
+            if threshold_override is not None
+            else self._semantic_threshold
+        )
 
         query_vec = np.array(query_embedding, dtype=np.float32)
         best_sim = 0.0
@@ -189,14 +199,14 @@ class ResponseCache:
         for k in expired_keys:
             del self._store[k]
 
-        if best_key is not None and best_sim >= self._semantic_threshold:
+        if best_key is not None and best_sim >= threshold:
             self._store.move_to_end(best_key)
             self._hits += 1
             self._semantic_hits += 1
             _, value, _ = self._store[best_key]
             logger.info(
                 f"Semantic cache hit: similarity={best_sim:.4f} "
-                f"matched='{best_key[0][:60]}...'"
+                f"(threshold={threshold:.3f}) matched='{best_key[0][:60]}...'"
             )
             return value
 

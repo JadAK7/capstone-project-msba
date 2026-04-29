@@ -347,6 +347,138 @@ def run_stress(chatbot, stress_questions, output, bypass_admin: bool = False) ->
 
 
 # ---------------------------------------------------------------------------
+# GOLDEN MODE: all in-scope golden_set items, every variant, per-category
+# ---------------------------------------------------------------------------
+
+GOLDEN_IN_SCOPE_CATEGORIES = (
+    "faq_direct",
+    "policy_hours",
+    "database_recommendation",
+    "arabic",
+    "follow_up_ambiguous",
+)
+
+
+def _aggregate(rows):
+    """Collapse a list of per-question score dicts into summary metrics."""
+    ok = [r for r in rows if "error" not in r]
+    return {
+        "n_tested":         len(rows),
+        "n_scored":         len(ok),
+        "answer_relevance": _avg([r["answer_relevance"] for r in ok]),
+        "groundedness":     _avg([r["groundedness"]     for r in ok]),
+        "grounding_score":  _avg([r["grounding_score"]  for r in ok]),
+        "abstention_rate":  round(len([r for r in ok if r.get("abstained")]) / max(len(ok), 1), 4),
+        "mean_elapsed_ms":  _avg([r.get("elapsed_ms", 0) for r in ok]),
+    }
+
+
+def run_golden(chatbot, golden_questions, output, bypass_admin: bool = False) -> dict:
+    """Run every variant against every in-scope golden_set item and report
+    overall + per-category deltas vs the full pipeline."""
+    questions = [q for q in golden_questions
+                 if q.get("expected_behavior") == "answer"
+                 and q.get("category") in GOLDEN_IN_SCOPE_CATEGORIES]
+    print(f"\n{'='*W}")
+    print(f"  ABLATION STUDY — GOLDEN MODE  (n={len(questions)} in-scope golden questions)")
+    print(f"  4 variants × {len(questions)} questions = {4*len(questions)} chatbot calls")
+    if bypass_admin:
+        print(f"  [admin bypass ON] custom_notes excluded and feedback lookup disabled.")
+    print(f"{'='*W}")
+
+    VARIANTS = [
+        ("full",        "Full pipeline",         _run_full),
+        ("no_rewrite",  "No query rewriting",    _run_no_rewrite),
+        ("vector_only", "Vector-only (no BM25)", _run_vector_only),
+        ("no_rerank",   "No LLM reranking",      _run_no_rerank),
+    ]
+
+    raw = {}
+    for key, label, runner in VARIANTS:
+        runner_eff = _with_admin_bypass(runner) if bypass_admin else runner
+        print(f"\n  Running variant: {label} ...")
+        raw[key] = run_variant(label, runner_eff, questions, chatbot)
+
+    # Index per-question scores by id so we can slice by category
+    per_q_by_variant = {k: {r.get("id", ""): r for r in raw[k]["per_question"]}
+                        for k in raw}
+    by_category = {}
+    cat_order = []
+    for q in questions:
+        cat = q["category"]
+        if cat not in by_category:
+            by_category[cat] = []
+            cat_order.append(cat)
+        by_category[cat].append(q["id"])
+
+    # ── Overall summary ─────────────────────────────────────────────
+    print(f"\n{'='*W}")
+    print(f"  OVERALL  (n={len(questions)})")
+    print(f"{'='*W}")
+    _section("Overall results")
+    full_summary = raw["full"]
+    _row(full_summary)
+    baseline_grnd = full_summary["grounding_score"]
+    baseline_rel  = full_summary["answer_relevance"]
+    for key, _, _ in VARIANTS[1:]:
+        _row(raw[key], baseline_rel, baseline_grnd)
+
+    # ── Per-category breakdown ──────────────────────────────────────
+    cat_results = {}
+    for cat in cat_order:
+        ids = set(by_category[cat])
+        slice_summary = {}
+        for key, label, _ in VARIANTS:
+            rows = [per_q_by_variant[key][i] for i in ids if i in per_q_by_variant[key]]
+            agg = _aggregate(rows)
+            agg["label"] = label
+            slice_summary[key] = agg
+        cat_results[cat] = slice_summary
+
+        print(f"\n{'─'*W}")
+        print(f"  CATEGORY: {cat}  (n={len(ids)})")
+        print(f"{'─'*W}")
+        _section(f"{cat} results")
+        full_cat = slice_summary["full"]
+        _row(full_cat)
+        b_grnd = full_cat["grounding_score"]
+        b_rel  = full_cat["answer_relevance"]
+        for key, _, _ in VARIANTS[1:]:
+            _row(slice_summary[key], b_rel, b_grnd)
+
+    # ── Final delta matrix ──────────────────────────────────────────
+    print(f"\n{'='*W}")
+    print(f"  GROUNDING-SCORE DELTA MATRIX  (variant minus full)")
+    print(f"{'='*W}")
+    header = f"  {'Category':<26}  {'n':>4}  {'Full':>7}  " + "  ".join(
+        f"{lbl:>14}" for _, lbl, _ in VARIANTS[1:])
+    print(header)
+    print(f"  {'─'*(len(header)-2)}")
+
+    def _delta(slice_dict, key):
+        d = slice_dict[key]["grounding_score"] - slice_dict["full"]["grounding_score"]
+        return f"{d:+.1%}"
+
+    overall_slice = {k: raw[k] for k in raw}
+    print(f"  {'OVERALL':<26}  {len(questions):>4}  {raw['full']['grounding_score']:>7.1%}  " +
+          "  ".join(f"{_delta(overall_slice, k):>14}" for k, _, _ in VARIANTS[1:]))
+    for cat in cat_order:
+        n = len(by_category[cat])
+        full_g = cat_results[cat]["full"]["grounding_score"]
+        cells = "  ".join(f"{_delta(cat_results[cat], k):>14}" for k, _, _ in VARIANTS[1:])
+        print(f"  {cat:<26}  {n:>4}  {full_g:>7.1%}  {cells}")
+    print(f"{'='*W}")
+    print("  Negative delta = the ablated stage was contributing.\n")
+
+    return {
+        "n_questions": len(questions),
+        "overall": {k: {**raw[k], "per_question": raw[k]["per_question"]} for k in raw},
+        "by_category": cat_results,
+        "category_question_ids": {c: list(by_category[c]) for c in cat_order},
+    }
+
+
+# ---------------------------------------------------------------------------
 # GENERAL MODE: original random-subset approach
 # ---------------------------------------------------------------------------
 
@@ -402,8 +534,11 @@ def run_general(chatbot, golden_questions, n, variants_to_run, output, bypass_ad
 
 def main():
     parser = argparse.ArgumentParser(description="Ablation study on pipeline stages")
-    parser.add_argument("--mode", choices=["stress", "general"], default="stress",
-                        help="stress = targeted questions per stage (recommended); general = random subset")
+    parser.add_argument("--mode", choices=["stress", "general", "golden"], default="stress",
+                        help="golden = run every variant on all 90 in-scope golden_set items "
+                             "with per-category breakdown (recommended for thesis); "
+                             "stress = targeted per-stage stress questions; "
+                             "general = random subset")
     parser.add_argument("--golden", type=str,
                         default=os.path.join(DATA_DIR, "golden_set.json"))
     parser.add_argument("--stress-set", type=str,
@@ -432,6 +567,11 @@ def main():
         with open(args.stress_set, encoding="utf-8") as f:
             stress_data = json.load(f)
         results = run_stress(chatbot, stress_data["questions"], args.output,
+                             bypass_admin=args.bypass_admin)
+    elif args.mode == "golden":
+        with open(args.golden, encoding="utf-8") as f:
+            golden_data = json.load(f)
+        results = run_golden(chatbot, golden_data["questions"], args.output,
                              bypass_admin=args.bypass_admin)
     else:
         with open(args.golden, encoding="utf-8") as f:

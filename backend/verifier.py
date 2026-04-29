@@ -239,3 +239,232 @@ def verify_answer(
                 + "\n\nPlease verify this information with the library directly."
             )
         return fallback, ["VERIFICATION_ERROR: verifier call failed, using cautious fallback"]
+
+
+# ---------------------------------------------------------------------------
+# Repair loop: revise a flagged answer using only supported context, then
+# re-verify. Reduces verifier false-positives by giving the model a chance to
+# rewrite a coherent answer instead of immediately accepting a stripped-down
+# or abstention output.
+# ---------------------------------------------------------------------------
+
+# Sentinels in `removed_claims` that indicate the verifier output should NOT
+# be repaired (safety violation, parse error, or our own repair markers).
+_NON_REPAIRABLE_PREFIXES = (
+    "SAFETY_VIOLATION",
+    "PARSE_ERROR",
+    "VERIFICATION_ERROR",
+    "REPAIR_",
+)
+
+
+def _has_non_repairable(removed: List[str]) -> bool:
+    return any(
+        any(c.startswith(p) for p in _NON_REPAIRABLE_PREFIXES)
+        for c in removed
+    )
+
+
+def revise_answer(
+    query: str,
+    draft_answer: str,
+    context: str,
+    lang: str = "en",
+    removed_claims: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Ask the LLM to rewrite an answer using only context-supported claims.
+
+    Used as the "repair" step in the verifier repair loop. The verifier's
+    own rewrite tends to be conservative (drops claims, leaves stub sentences);
+    this revision pass gives the model a fresh shot at producing a coherent
+    answer using only the facts present in the context.
+
+    Args:
+        query: Original user question.
+        draft_answer: The (already-flagged) draft from the first verification.
+        context: The same context passages used for generation.
+        lang: Output language ("en" or "ar").
+        removed_claims: Claims the first-pass verifier flagged as unsupported.
+
+    Returns:
+        Revised answer string, or None if the LLM call failed.
+    """
+    if not draft_answer or not context:
+        return None
+
+    removed_claims = removed_claims or []
+    flagged_section = ""
+    if removed_claims:
+        flagged_section = (
+            "\n\nClaims previously flagged as UNSUPPORTED (do NOT include in revision):\n"
+            + "\n".join(f"- {c[:200]}" for c in removed_claims[:10])
+        )
+
+    lang_instruction = (
+        "Respond in Arabic." if lang == "ar" else "Respond in English."
+    )
+
+    try:
+        revised = chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are revising a draft answer for a university library chatbot. "
+                        "The previous draft contained claims that could not be supported by "
+                        "the provided context. Your job is to write a CLEAN, COHERENT answer "
+                        "using ONLY facts that are explicitly stated in the context.\n\n"
+                        "Rules:\n"
+                        "1. Use ONLY information present in the context passages. Quote or "
+                        "closely paraphrase — do not paraphrase loosely.\n"
+                        "2. If the context does not address part of the question, explicitly "
+                        "say you don't have that information rather than guessing.\n"
+                        "3. Preserve markdown formatting from the draft (bold, lists, links).\n"
+                        "4. Preserve every (Source: ...) citation tied to facts you keep.\n"
+                        "5. Preserve numbers, dates, times, URLs, emails EXACTLY as in context.\n"
+                        "6. Do NOT use hedging words (typically, usually, generally, likely, "
+                        "probably). If a fact is in the context, state it; otherwise omit.\n"
+                        "7. Do NOT invent new claims to replace removed ones.\n"
+                        "8. The revised answer should read fluently — not as fragments with "
+                        "obvious gaps. If you must omit a major aspect, smoothly note that "
+                        "the information was not found.\n"
+                        f"9. {lang_instruction}\n"
+                        "Output ONLY the revised answer text. No preamble, no JSON."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Context passages:\n{context}\n\n"
+                        f"Question: {query}\n\n"
+                        f"Previous draft (had unsupported claims):\n{draft_answer}"
+                        f"{flagged_section}\n\n"
+                        "Write a revised answer using ONLY context-supported facts."
+                    ),
+                },
+            ],
+            max_tokens=1000,
+            top_p=0.85,
+            call_type="verify",
+        )
+        if revised:
+            revised = revised.strip()
+            return revised or None
+        return None
+    except Exception as e:
+        logger.warning(f"revise_answer LLM call failed: {e}")
+        return None
+
+
+def _is_substantial(text: str) -> bool:
+    """Heuristic: a verifier-stripped answer is 'substantial' if it has >30 chars."""
+    return bool(text) and len(text.strip()) >= 30
+
+
+def verify_with_repair(
+    query: str,
+    draft_answer: str,
+    context: str,
+    lang: str = "en",
+) -> Tuple[str, List[str], dict]:
+    """Verify a draft answer with one repair attempt before giving up.
+
+    Flow:
+      1. Verify the draft.
+      2. If clean (or non-repairable failure like safety violation), return.
+      3. Otherwise, ask the LLM to revise the draft using only supported claims.
+      4. Verify the revision.
+      5. If the revision still fails, return whichever pass produced the more
+         substantial answer (prefer revised if non-trivial, else first-pass).
+
+    Returns:
+        (final_answer, removed_claims, repair_debug)
+
+    repair_debug fields:
+        - first_pass_answer
+        - first_pass_removed
+        - revision_attempted (bool)
+        - revised_draft (or None)
+        - revised_pass_removed (or None)
+        - repair_outcome: 'no_repair_needed' | 'repair_succeeded' |
+                          'repair_failed_kept_revised' | 'repair_failed_kept_first' |
+                          'repair_skipped_non_repairable' | 'revision_call_failed'
+    """
+    repair_debug = {
+        "first_pass_answer": None,
+        "first_pass_removed": [],
+        "revision_attempted": False,
+        "revised_draft": None,
+        "revised_pass_removed": None,
+        "repair_outcome": "no_repair_needed",
+    }
+
+    # First verification pass
+    verified, removed = verify_answer(query, draft_answer, context, lang)
+    repair_debug["first_pass_answer"] = verified
+    repair_debug["first_pass_removed"] = list(removed)
+
+    # Clean? No repair needed.
+    if not removed:
+        return verified, removed, repair_debug
+
+    # Don't try to repair safety violations or parse errors.
+    if _has_non_repairable(removed):
+        repair_debug["repair_outcome"] = "repair_skipped_non_repairable"
+        return verified, removed, repair_debug
+
+    # Attempt one revision.
+    repair_debug["revision_attempted"] = True
+    revised = revise_answer(
+        query=query,
+        draft_answer=draft_answer,
+        context=context,
+        lang=lang,
+        removed_claims=removed,
+    )
+
+    if not revised:
+        repair_debug["repair_outcome"] = "revision_call_failed"
+        return verified, removed, repair_debug
+
+    repair_debug["revised_draft"] = revised
+
+    # Verify the revision.
+    verified_revised, removed_revised = verify_answer(query, revised, context, lang)
+    repair_debug["revised_pass_removed"] = list(removed_revised)
+
+    # Revision now clean — accept it.
+    if not removed_revised:
+        repair_debug["repair_outcome"] = "repair_succeeded"
+        logger.info(
+            f"Repair succeeded: first-pass removed {len(removed)} claim(s), "
+            f"revision verified clean"
+        )
+        # Mark with first-pass removals for transparency, but don't double-count.
+        return verified_revised, [
+            *removed,
+            "REPAIR_SUCCEEDED: revised answer passed second verification",
+        ], repair_debug
+
+    # Revision still flagged. Pick whichever output is more substantial.
+    if _is_substantial(verified_revised) and not _has_non_repairable(removed_revised):
+        repair_debug["repair_outcome"] = "repair_failed_kept_revised"
+        logger.info(
+            f"Repair partial: revision still flagged ({len(removed_revised)} claims), "
+            f"keeping revised output as more substantial"
+        )
+        return verified_revised, [
+            *removed,
+            *removed_revised,
+            "REPAIR_PARTIAL: kept revised after second flag",
+        ], repair_debug
+
+    repair_debug["repair_outcome"] = "repair_failed_kept_first"
+    logger.info(
+        f"Repair failed: revision still flagged and not substantial, "
+        f"keeping first-pass output"
+    )
+    return verified, [
+        *removed,
+        "REPAIR_FAILED: revision still flagged, kept first-pass output",
+    ], repair_debug
