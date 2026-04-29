@@ -396,6 +396,66 @@ class LibraryChatbot:
         """Determine response language. Always auto-detects from query text."""
         return LanguageDetector.detect(query)
 
+    @staticmethod
+    def _normalize_cache_query(q: str) -> str:
+        """Normalize a query for cache key matching.
+
+        Lowercase, collapse whitespace, strip trailing question marks and
+        common punctuation. Reduces near-duplicate misses on phrasings like
+        'library hours?' vs 'library hours' vs 'Library Hours'.
+        """
+        if not q:
+            return ""
+        s = q.strip().lower()
+        # Strip trailing punctuation
+        s = re.sub(r"[?!.,;:\s]+$", "", s)
+        # Collapse internal whitespace
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    @staticmethod
+    def _compute_semantic_threshold(rewritten_query: str) -> float:
+        """Length-aware semantic-cache threshold.
+
+        Short queries (e.g., 'library hours') drop in cosine similarity
+        disproportionately on small wording changes, so we relax the
+        threshold for them. Longer queries get the strict default.
+        """
+        token_count = len(rewritten_query.split())
+        if token_count <= 5:
+            return 0.92
+        return 0.95
+
+    def _finalize_answer(
+        self,
+        answer: str,
+        debug: dict,
+        user_lang: str,
+    ) -> Tuple[str, dict]:
+        """Translate an English answer to Arabic if the user asked in Arabic.
+
+        All LLM-generated answers are produced in English regardless of user
+        language so that bilingual answers stay factually consistent. This
+        helper performs the final translation step before returning to the
+        caller and stores the original English answer in the debug dict.
+        """
+        if user_lang != Config.LANG_AR:
+            return answer, debug
+
+        if not answer or not answer.strip():
+            return answer, debug
+
+        # Skip translation if the answer already contains Arabic script
+        # (e.g., a hardcoded Arabic abstention message).
+        if LanguageDetector.detect(answer) == Config.LANG_AR:
+            return answer, debug
+
+        translated = self._translate_to_arabic(answer)
+        debug = dict(debug)
+        debug["translated_to_arabic"] = True
+        debug["english_answer"] = answer
+        return translated, debug
+
     def answer(
         self,
         query: str,
@@ -457,7 +517,16 @@ class LibraryChatbot:
         lang: str,
         history: Optional[List[dict]] = None,
     ) -> Tuple[str, dict]:
-        """Internal pipeline — separated so top-level answer() can catch LLM failures."""
+        """Internal pipeline — separated so top-level answer() can catch LLM failures.
+
+        All LLM-generated content is produced in English from English context;
+        if the user asked in Arabic, the final answer is translated at the
+        return point via _finalize_answer() to keep bilingual answers
+        factually identical.
+        """
+
+        # `lang` here is the user's language; internal generation uses LANG_EN.
+        user_lang = lang
 
         timer = StageTimer()
 
@@ -465,10 +534,11 @@ class LibraryChatbot:
         with timer.time("input_guards"):
             guard_result = run_input_guards(query)
         if not guard_result.allowed:
-            refusal = get_refusal_message(guard_result.refusal_reason, lang)
+            # Refusals use pre-translated UI strings; skip translation.
+            refusal = get_refusal_message(guard_result.refusal_reason, user_lang)
             debug = {
                 "query": query,
-                "detected_language": lang,
+                "detected_language": user_lang,
                 "chosen_source": f"refused ({guard_result.refusal_reason})",
                 "cache_hit": False,
                 "pipeline": "input_guard",
@@ -488,7 +558,7 @@ class LibraryChatbot:
         with timer.time("feedback_correction"):
             feedback = self._lookup_feedback(query)
 
-        original_cache_key = (query.strip().lower(), lang)
+        original_cache_key = (self._normalize_cache_query(query), user_lang)
         with timer.time("cache_lookup"):
             if not feedback:
                 cached = self._cache.get(original_cache_key)
@@ -499,11 +569,11 @@ class LibraryChatbot:
                     return answer, debug
 
         # --- 2. Query rewriting (LLM-based) ---
-        # Rewritten query is English, self-contained, optimized for retrieval.
-        # Original query is preserved for answer generation (to match user's language).
+        # Rewritten query is English, self-contained, optimized for retrieval
+        # AND used as the question for English-first answer generation.
         with timer.time("query_rewriting"):
             rewritten_query, rewrite_debug = rewrite_query(
-                query=query, history=history, lang=lang,
+                query=query, history=history, lang=user_lang,
             )
 
         # --- Check for admin feedback on rewritten query too ---
@@ -511,8 +581,8 @@ class LibraryChatbot:
             if not feedback:
                 feedback = self._lookup_feedback(rewritten_query)
 
-        # --- Secondary cache lookup (keyed on rewritten query + language) ---
-        cache_key = (rewritten_query, lang)
+        # --- Secondary cache lookup (keyed on rewritten query + user language) ---
+        cache_key = (rewritten_query, user_lang)
         with timer.time("cache_lookup"):
             if not feedback:
                 cached = self._cache.get(cache_key)
@@ -534,23 +604,69 @@ class LibraryChatbot:
         with timer.time("query_rewriting"):
             query_embedding = embed_text(rewritten_query)
 
-        # --- Semantic cache lookup ---
+        # --- Semantic cache lookup (length-aware threshold) ---
+        semantic_threshold = self._compute_semantic_threshold(rewritten_query)
         with timer.time("cache_lookup"):
             if not feedback:
-                cached = self._cache.semantic_get(query_embedding, lang)
+                cached = self._cache.semantic_get(
+                    query_embedding, user_lang,
+                    threshold_override=semantic_threshold,
+                )
                 if cached is not None:
                     answer, debug = cached
                     debug = dict(debug)
                     debug["cache_hit"] = True
                     debug["semantic_cache_hit"] = True
+                    debug["semantic_threshold"] = semantic_threshold
                     self._cache.put(original_cache_key, cached, embedding=query_embedding)
                     self._cache.put(cache_key, cached, embedding=query_embedding)
                     return answer, debug
 
-        # Helper to store result under both cache keys (with embedding for semantic matching)
-        def _cache_result(result):
+        # --- Cross-lingual cache (Arabic users): try English cache + translate ---
+        # When the user asks in Arabic but a previous English user already
+        # populated the cache, translate the English answer instead of running
+        # the full pipeline a second time.
+        if not feedback and user_lang == Config.LANG_AR:
+            with timer.time("cache_lookup"):
+                en_cache_key = (rewritten_query, Config.LANG_EN)
+                en_cached = self._cache.get(en_cache_key)
+                if en_cached is None:
+                    en_cached = self._cache.semantic_get(
+                        query_embedding, Config.LANG_EN,
+                        threshold_override=semantic_threshold,
+                    )
+            if en_cached is not None:
+                en_answer, en_debug = en_cached
+                with timer.time("generation"):
+                    ar_answer = self._translate_to_arabic(en_answer)
+                ar_debug = dict(en_debug)
+                ar_debug["cache_hit"] = True
+                ar_debug["translated_from_english_cache"] = True
+                ar_debug["english_answer"] = en_answer
+                ar_debug["detected_language"] = user_lang
+                ar_debug["stage_latencies"] = timer.as_dict()
+                ar_result = (ar_answer, ar_debug)
+                self._cache.put(cache_key, ar_result, embedding=query_embedding)
+                self._cache.put(original_cache_key, ar_result, embedding=query_embedding)
+                return ar_result
+
+        # Helper to store result under both user-language keys, AND under the
+        # English key for cross-lingual reuse.  Pass the source English answer
+        # (before translation) so future English users hit the cache too.
+        def _cache_result(result, english_answer: Optional[str] = None):
             self._cache.put(cache_key, result, embedding=query_embedding)
             self._cache.put(original_cache_key, result, embedding=query_embedding)
+            if english_answer and user_lang != Config.LANG_EN:
+                en_debug = dict(result[1])
+                en_debug.pop("translated_to_arabic", None)
+                en_debug.pop("english_answer", None)
+                en_debug["detected_language"] = Config.LANG_EN
+                en_result = (english_answer, en_debug)
+                self._cache.put(
+                    (rewritten_query, Config.LANG_EN),
+                    en_result,
+                    embedding=query_embedding,
+                )
 
         # --- 3. Intent classification → pre-filtering ---
         # Use LLM intent from the rewriter when available; fall back to keyword classifier.
@@ -689,7 +805,7 @@ class LibraryChatbot:
             "is_db_intent": is_db_intent,
             "library_available": self.library_available,
             "chosen_source": None,
-            "detected_language": lang,
+            "detected_language": user_lang,
             "cache_hit": False,
             "retrieved_chunks": retrieved_chunks,
             "search_query": rewritten_query,
@@ -707,33 +823,41 @@ class LibraryChatbot:
                 debug["chosen_source"] = "admin_feedback_correction"
                 debug["feedback_correction"] = feedback["corrected_answer"]
                 debug["feedback_similarity"] = feedback["similarity"]
-                formatted = self._format_feedback_answer(
-                    query=query, corrected_answer=feedback["corrected_answer"],
-                    lang=lang, history=history,
+                english_answer = self._format_feedback_answer(
+                    query=rewritten_query,
+                    corrected_answer=feedback["corrected_answer"],
+                    lang=Config.LANG_EN, history=history,
                 )
+                formatted, debug = self._finalize_answer(english_answer, debug, user_lang)
                 debug["stage_latencies"] = timer.as_dict()
                 result = (formatted, debug)
-                _cache_result(result)
+                _cache_result(result, english_answer=english_answer)
                 return result
             elif feedback["rating"] == 1 and feedback.get("original_answer"):
                 debug["chosen_source"] = "admin_feedback_confirmed"
                 debug["feedback_similarity"] = feedback["similarity"]
-                formatted = self._format_feedback_answer(
-                    query=query, corrected_answer=feedback["original_answer"],
-                    lang=lang, history=history,
+                english_answer = self._format_feedback_answer(
+                    query=rewritten_query,
+                    corrected_answer=feedback["original_answer"],
+                    lang=Config.LANG_EN, history=history,
                 )
+                formatted, debug = self._finalize_answer(english_answer, debug, user_lang)
                 debug["stage_latencies"] = timer.as_dict()
                 result = (formatted, debug)
-                _cache_result(result)
+                _cache_result(result, english_answer=english_answer)
                 return result
 
         # --- Database intent routing ---
         if is_db_intent and best_db_score > 0:
             debug["chosen_source"] = "database (keyword intent)"
             db_candidates = [c for c in reranked if c.get("source_table") == "databases"]
+            english_answer = self._format_db_recommendations(
+                db_candidates, Config.LANG_EN, k=5,
+            )
+            formatted, debug = self._finalize_answer(english_answer, debug, user_lang)
             debug["stage_latencies"] = timer.as_dict()
-            result = (self._format_db_recommendations(db_candidates, lang, k=5), debug)
-            _cache_result(result)
+            result = (formatted, debug)
+            _cache_result(result, english_answer=english_answer)
             return result
 
         # --- 6. Source-priority-aware chunk selection for grounded answer ---
@@ -770,7 +894,8 @@ class LibraryChatbot:
                 if chosen_source == "faculty_text (admin)":
                     with timer.time("generation"):
                         gen_result = self._format_faculty_text_answer(
-                            query, top_chunks, lang, history=history,
+                            rewritten_query, top_chunks,
+                            Config.LANG_EN, history=history,
                         )
                     debug["context_sent_to_llm"] = gen_result["context_sent"]
                     debug["draft_answer"] = gen_result["answer"]
@@ -779,10 +904,11 @@ class LibraryChatbot:
                     debug["context_confidence"] = "confident (admin source)"
                     with timer.time("verification"):
                         pass  # merged into generation for admin source
+                    english_answer = gen_result["answer"]
+                    formatted, debug = self._finalize_answer(english_answer, debug, user_lang)
                     debug["stage_latencies"] = timer.as_dict()
-
-                    result = (gen_result["answer"], debug)
-                    _cache_result(result)
+                    result = (formatted, debug)
+                    _cache_result(result, english_answer=english_answer)
                     return result
 
                 # --- FAST PATH: skip full grounding for very high-confidence matches ---
@@ -793,7 +919,8 @@ class LibraryChatbot:
                     )
                     with timer.time("generation"):
                         gen_result = self._format_fast_path_answer(
-                            query, top_chunks, lang, history=history,
+                            rewritten_query, top_chunks,
+                            Config.LANG_EN, history=history,
                         )
                     debug["context_sent_to_llm"] = gen_result["context_sent"]
                     debug["draft_answer"] = gen_result["answer"]
@@ -803,10 +930,11 @@ class LibraryChatbot:
                     debug["pipeline"] = "fast_path"
                     with timer.time("verification"):
                         pass  # regex-only check already done inside fast_path_answer
+                    english_answer = gen_result["answer"]
+                    formatted, debug = self._finalize_answer(english_answer, debug, user_lang)
                     debug["stage_latencies"] = timer.as_dict()
-
-                    result = (gen_result["answer"], debug)
-                    _cache_result(result)
+                    result = (formatted, debug)
+                    _cache_result(result, english_answer=english_answer)
                     return result
 
                 # Standard grounded pipeline for scraped/FAQ sources
@@ -814,7 +942,7 @@ class LibraryChatbot:
 
                 with timer.time("generation"):
                     gen_result = self._format_grounded_answer(
-                        query, top_chunks, lang,
+                        rewritten_query, top_chunks, Config.LANG_EN,
                         history=history,
                         partial_context=is_partial,
                     )
@@ -828,24 +956,30 @@ class LibraryChatbot:
                 debug["verified"] = len(gen_result["removed_claims"]) == 0
                 debug["context_confidence"] = "partial" if is_partial else "confident"
 
+                english_answer = gen_result["answer"]
+                formatted, debug = self._finalize_answer(english_answer, debug, user_lang)
                 debug["stage_latencies"] = timer.as_dict()
-                result = (gen_result["answer"], debug)
-                _cache_result(result)
+                result = (formatted, debug)
+                _cache_result(result, english_answer=english_answer)
                 return result
 
             except LLMUnavailableError:
                 logger.warning("LLM generation failed after successful retrieval, returning raw chunks")
-                answer = self._format_raw_chunks_fallback(top_chunks[:3], lang)
+                # LLM is unavailable, so we cannot translate. Return the
+                # localized raw-chunks fallback in the user's language.
+                answer = self._format_raw_chunks_fallback(top_chunks[:3], user_lang)
                 debug["degradation_type"] = "llm_generation_failed"
                 debug["pipeline"] = "raw_chunks_fallback"
                 debug["stage_latencies"] = timer.as_dict()
                 return answer, debug
 
         # --- Fallback: context too weak, abstain rather than hallucinate ---
+        # The "unclear" message is a pre-translated UI string in both languages,
+        # so we use user_lang directly and skip the translation step.
         debug["chosen_source"] = "none (below threshold)"
         debug["top_rerank_score"] = top_score
         debug["stage_latencies"] = timer.as_dict()
-        result = (self._format_unclear(lang), debug)
+        result = (self._format_unclear(user_lang), debug)
         _cache_result(result)
         return result
 
@@ -1361,25 +1495,41 @@ class LibraryChatbot:
         return _RESPONSE_TEMPLATES[lang]["unclear"]
 
     def _translate_to_arabic(self, text: str) -> str:
-        """Translate an English text snippet to Arabic using the LLM."""
+        """Translate an English answer (or snippet) to Arabic.
+
+        Designed for full chatbot answers: preserves markdown, URLs, numbers,
+        citations, English database/journal names, and (Source: ...) tags so
+        bilingual answers stay structurally and factually identical.
+        """
+        if not text or not text.strip():
+            return text
         try:
-            return chat_completion(
+            translated = chat_completion(
                 messages=[
                     {
                         "role": "system",
                         "content": (
-                            "\u062A\u0631\u062C\u0645 \u0627\u0644\u0646\u0635 "
-                            "\u0627\u0644\u062A\u0627\u0644\u064A \u0625\u0644\u0649 "
-                            "\u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629. "
-                            "\u062D\u0627\u0641\u0638 \u0639\u0644\u0649 "
-                            "\u0623\u0633\u0645\u0627\u0621 \u0642\u0648\u0627\u0639\u062F "
-                            "\u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A "
-                            "\u0648\u0627\u0644\u0645\u0635\u0637\u0644\u062D\u0627\u062A "
-                            "\u0627\u0644\u062A\u0642\u0646\u064A\u0629 "
-                            "\u0628\u0627\u0644\u0625\u0646\u062C\u0644\u064A\u0632\u064A\u0629. "
-                            "\u0623\u0639\u062F \u0627\u0644\u062A\u0631\u062C\u0645\u0629 "
-                            "\u0641\u0642\u0637 \u0628\u062F\u0648\u0646 \u0623\u064A "
-                            "\u0634\u0631\u062D \u0625\u0636\u0627\u0641\u064A."
+                            "You translate English text to Arabic for an Arabic-speaking "
+                            "university student using a library chatbot.\n\n"
+                            "Critical preservation rules \u2014 these MUST be followed:\n"
+                            "1. Preserve ALL markdown formatting exactly: **bold**, *italic*, "
+                            "headings (#, ##), bullet/numbered lists, [link text](url), tables.\n"
+                            "2. Preserve URLs, email addresses, and phone numbers EXACTLY "
+                            "(do not translate or modify them).\n"
+                            "3. Preserve numbers, dates, times, and identifiers EXACTLY. "
+                            "Use Western Arabic numerals (0-9), not Arabic-Indic digits.\n"
+                            "4. Preserve database names, journal names, software names, and "
+                            "English technical terms in English (e.g., IEEE, Scopus, JSTOR).\n"
+                            "5. Preserve citation tags like '(Source: page > section)' and "
+                            "'**Sources:**' labels \u2014 translate the surrounding label words "
+                            "but keep source titles, sections, and links exactly as written.\n"
+                            "6. Translate the prose to natural, fluent Arabic suitable for a "
+                            "university student. Maintain the same level of formality.\n"
+                            "7. Do NOT add, remove, or restructure facts. Translate every "
+                            "sentence \u2014 do not summarize, expand, or skip content.\n"
+                            "8. If the input is already mostly Arabic, return it unchanged.\n\n"
+                            "Output ONLY the translated text. No commentary, no original, "
+                            "no quotation marks around the output."
                         ),
                     },
                     {
@@ -1387,9 +1537,12 @@ class LibraryChatbot:
                         "content": text,
                     },
                 ],
-                temperature=0.1,
-                max_tokens=500,
+                max_tokens=2000,
+                top_p=0.9,
+                call_type="generate",
             )
+            translated = (translated or "").strip()
+            return translated or text
         except (LLMUnavailableError, Exception) as e:
             logger.error(f"Translation to Arabic failed: {e}")
             return text

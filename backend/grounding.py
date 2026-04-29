@@ -321,17 +321,20 @@ def generate_and_verify(
       - Regex output safety check (always runs)
       - Local chunk_id range validation
 
-    Conditional fallback (one extra LLM call):
+    Conditional fallback (one extra LLM call, plus an optional repair pass):
       - If verified=false OR flags non-empty OR invalid chunk references
-        → call verify_answer() from verifier.py on the generated answer
+        → call verify_with_repair() from verifier.py: this verifies the
+          answer, then if claims were flagged, asks the LLM to revise the
+          answer using only supported claims and verifies again before
+          giving up. Reduces verifier false positives.
 
     Structured-output parse failure fallback:
       - If the LLM returns unparseable JSON → fall back to two-stage behavior:
-        generate (plain text) then verify_answer() separately.
+        generate (plain text) then verify_with_repair() separately.
 
     Returns (final_answer, draft_answer, removed_claims).
     """
-    from .verifier import check_output_safety, verify_answer
+    from .verifier import check_output_safety, verify_with_repair
 
     planned_claims = evidence_plan.get("claims", [])
     unsupported_aspects = evidence_plan.get("unsupported_aspects", [])
@@ -429,7 +432,9 @@ def generate_and_verify(
                 query, context, evidence_plan, system_prompt, lang,
                 partial_context, history_msgs,
             )
-            final, removed = verify_answer(query, draft_raw, context, lang)
+            final, removed, _repair_debug = verify_with_repair(
+                query, draft_raw, context, lang
+            )
             return final, draft_raw, removed + ["PARSE_ERROR: structured output fallback used"]
 
         try:
@@ -440,7 +445,9 @@ def generate_and_verify(
                 query, context, evidence_plan, system_prompt, lang,
                 partial_context, history_msgs,
             )
-            final, removed = verify_answer(query, draft_raw, context, lang)
+            final, removed, _repair_debug = verify_with_repair(
+                query, draft_raw, context, lang
+            )
             return final, draft_raw, removed + ["PARSE_ERROR: JSON decode fallback used"]
 
         answer = result.get("answer", "")
@@ -483,11 +490,16 @@ def generate_and_verify(
                 "generate_and_verify triggering external verifier: %s",
                 ", ".join(reason_parts),
             )
-            verified_answer, extra_removed = verify_answer(query, answer, context, lang)
+            verified_answer, extra_removed, _repair_debug = verify_with_repair(
+                query, answer, context, lang
+            )
             removed = list(removed) + extra_removed
             if extra_removed:
                 logger.info(
-                    "External verifier removed %d additional claims", len(extra_removed)
+                    "External verifier (with repair) removed/flagged %d additional claims; "
+                    "outcome=%s",
+                    len(extra_removed),
+                    _repair_debug.get("repair_outcome", "unknown"),
                 )
             answer = verified_answer
 
