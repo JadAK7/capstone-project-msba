@@ -1,17 +1,22 @@
 """
 retriever.py
-Hybrid retrieval: combines vector (semantic) search with keyword (BM25-like) search.
-Retrieves candidates from all sources, merges and deduplicates results.
+Vector (semantic) retrieval over pgvector, with a hybrid scaffold for
+optionally fusing in a PostgreSQL full-text-search keyword path via RRF.
 
-v4 improvements (source-aware retrieval):
-  - Source priority boost in RRF scoring (gentle advantage for higher-trust sources)
+NOTE: The keyword arm is currently DISABLED in production. _reciprocal_rank_fusion
+defaults to vector_weight=1.0, keyword_weight=0.0 because an ablation showed the
+keyword path added zero new top-5 documents on a 15-query proper-noun-heavy test
+set and did not improve grounding score (see bm25_decision.json). The keyword
+implementation here is PostgreSQL ts_rank_cd over phraseto_tsquery + plainto_tsquery
+with synonym expansion -- it is NOT Okapi BM25, despite the legacy "BM25-like" label.
+
+v4 (source-aware retrieval):
+  - Source priority boost (gentle advantage for higher-trust sources, applied at rerank)
   - Per-source candidate limits (configurable via source_config)
-  - Minimum source diversity guarantee (prevents one source from dominating pool)
+  - Minimum source diversity guarantee (prevents one source from dominating the pool)
   - Source type metadata attached to every result
-  - Intent-based table pre-filtering (carried forward from v3)
-  - page_type filtering for document_chunks (carried forward from v3)
-  - phraseto_tsquery + plainto_tsquery combined keyword search
-  - Basic synonym expansion for common library terms
+  - Intent-based table pre-filtering
+  - page_type filtering for document_chunks
 """
 
 import re
@@ -111,7 +116,8 @@ def _expand_synonyms(query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# BM25-like keyword scoring (phrase + plain tsquery combined)
+# Lexical keyword scoring: PostgreSQL ts_rank_cd over phrase + plain tsquery
+# (NOT Okapi BM25 -- different algorithm; see module docstring)
 # ---------------------------------------------------------------------------
 
 def _keyword_search(

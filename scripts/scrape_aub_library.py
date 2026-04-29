@@ -1,29 +1,31 @@
-
 """
 AUB Library Website Scraper
-Scrapes all pages from the AUB library website using Playwright (headless browser)
-so that JavaScript-rendered content (e.g. opening hours) is captured.
+Scrapes pages from the AUB library website using requests + BeautifulSoup.
 Stores results in PostgreSQL with pgvector embeddings.
+
+Note: this is a static (non-JS-rendering) scraper. JavaScript-only content
+(e.g. dynamically rendered opening hours) will not be captured here — those
+should be sourced from the FAQ CSV or maintained as a custom_note.
 """
 
 import os
 import sys
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from collections import deque
+
+import requests
+from bs4 import BeautifulSoup
 from tqdm import tqdm
-from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from backend.database import init_db, get_connection
 
-# Configuration
 START_URLS = [
     "https://www.aub.edu.lb/libraries",
     "https://www.aub.edu.lb/Libraries",
@@ -32,11 +34,12 @@ ALLOWED_DOMAIN = "aub.edu.lb"
 ALLOWED_PATHS = ["/libraries", "/Libraries"]
 MAX_PAGES = 500
 CRAWL_DELAY = 1
-JS_WAIT_MS = 3000
-PAGE_TIMEOUT = 60000  # 60 seconds for page navigation
-MAX_RETRIES = 3  # Retry failed page loads
-RETRY_DELAY = 2  # Seconds between retries
+PAGE_TIMEOUT = 30  # seconds for HTTP request
+MAX_RETRIES = 3
+RETRY_DELAY = 2
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+
+NOISE_TAGS = ("script", "style", "noscript", "iframe", "svg")
 
 
 class AUBLibraryScraper:
@@ -45,27 +48,23 @@ class AUBLibraryScraper:
         self.allowed_domain = allowed_domain
         self.allowed_paths = allowed_paths
         self.visited = set()
-        self.visited_base = set()  # normalized URLs (no query params)
+        self.visited_base = set()
         self.to_visit = deque(start_urls)
         self.scraped_data = []
         self.failed_pages = []
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": USER_AGENT})
 
-    # Paths that produce massive HTML (newsletters, embedded PDFs, news articles)
-    # but don't contain useful FAQ/hours/services content for the chatbot.
     SKIP_PATH_PATTERNS = [
         "/newsletter", "/news/pages/",
     ]
 
     @staticmethod
     def normalize_url(url):
-        """Strip query params and fragments so the same page isn't scraped twice.
-
-        SharePoint pages like ?Expand=0, ?Expand=1 are the same content.
-        """
+        """Strip query params and fragments so the same page isn't scraped twice."""
         return url.split("?")[0].split("#")[0].rstrip("/")
 
     def is_valid_url(self, url):
-        """Check if URL should be crawled."""
         parsed = urlparse(url)
 
         if self.allowed_domain not in parsed.netloc:
@@ -76,104 +75,64 @@ class AUBLibraryScraper:
 
         path_lower = parsed.path.lower()
 
-        # Skip binary files
         skip_extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
                           '.zip', '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3',
                           '.css', '.js']
         if any(path_lower.endswith(ext) for ext in skip_extensions):
             return False
 
-        # Skip paths that produce bloated noise (newsletters, news articles)
         if any(pat in path_lower for pat in self.SKIP_PATH_PATTERNS):
             return False
 
-        # Deduplicate: if we've already visited the base URL (without query params),
-        # don't visit it again with different params.
         if self.normalize_url(url) in self.visited_base:
             return False
 
         return True
 
     @staticmethod
-    def _wait_for_stable_content(page, max_wait_ms=8000, interval_ms=500):
-        """Wait until the page's visible text stops growing.
+    def extract_text_and_html(soup):
+        """Return (text, html) from the parsed page.
 
-        Instead of a fixed sleep, this polls document.body.innerText.length
-        and returns once the value is stable for two consecutive checks.
-        Falls back to max_wait_ms if content never stabilises.
+        • text = innerText-equivalent with line breaks preserved.
+        • html = body innerHTML for the downstream content extractor.
         """
-        prev_len = 0
-        stable_checks = 0
-        elapsed = 0
-        while elapsed < max_wait_ms:
-            curr_len = page.evaluate("document.body.innerText.length")
-            if curr_len == prev_len and curr_len > 0:
-                stable_checks += 1
-                if stable_checks >= 2:
-                    return
-            else:
-                stable_checks = 0
-            prev_len = curr_len
-            page.wait_for_timeout(interval_ms)
-            elapsed += interval_ms
+        body = soup.body or soup
 
-    def extract_text_and_html(self, page):
-        """Extract text and raw HTML from the rendered page.
+        for tag in body.find_all(NOISE_TAGS):
+            tag.decompose()
 
-        Returns (text, html).
-        • text  = innerText with line breaks preserved (for fallback extraction).
-        • html  = full innerHTML (for proper HTML-based extraction in
-                  content_extractor.py — noise removal happens there, not here).
-        """
-        # Capture the FULL innerHTML *before* removing anything, so the
-        # downstream extractor can apply its own generic noise-removal.
-        html = page.evaluate("document.body.innerHTML")
+        html = body.decode_contents()
 
-        # For the text fallback, remove the noisiest elements in-browser first
-        # so innerText is cleaner.  Keep this minimal — the extractor handles
-        # the rest.
-        page.evaluate("""
-            for (const el of document.querySelectorAll(
-                'script, style, noscript, iframe, svg'
-            )) { el.remove(); }
-        """)
-
-        text = page.evaluate("document.body.innerText")
-        # Preserve line breaks — only collapse horizontal whitespace
+        text = body.get_text(separator="\n")
         text = re.sub(r'[^\S\n]+', ' ', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         text = text.strip()
 
         return text, html
 
-    def extract_links(self, page, current_url):
-        """Extract all valid links from rendered page."""
+    def extract_links(self, soup, current_url):
         links = []
-        hrefs = page.evaluate("""
-            Array.from(document.querySelectorAll('a[href]'))
-                 .map(a => a.href)
-        """)
-        for href in hrefs:
-            url = href.split('#')[0]
-            if self.is_valid_url(url) and url not in self.visited:
-                links.append(url)
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            absolute = urljoin(current_url, href).split('#')[0]
+            if self.is_valid_url(absolute) and absolute not in self.visited:
+                links.append(absolute)
         return links
 
-    def scrape_page(self, page, url):
-        """Scrape a single page using Playwright with retry logic."""
+    def scrape_page(self, url):
         for attempt in range(MAX_RETRIES):
             try:
-                page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
-                # Smart wait: poll until content stops growing instead of
-                # a fixed sleep.  Handles both fast-loading static pages and
-                # slow JS-rendered SharePoint content.
-                self._wait_for_stable_content(page)
+                resp = self.session.get(url, timeout=PAGE_TIMEOUT)
+                resp.raise_for_status()
 
-                title = page.title() or url
-                links = self.extract_links(page, url)
-                text, html = self.extract_text_and_html(page)
+                soup = BeautifulSoup(resp.text, "html.parser")
 
-                # No truncation — let the extraction pipeline see everything.
+                title_tag = soup.find("title")
+                title = (title_tag.string.strip() if title_tag and title_tag.string else url)
+
+                links = self.extract_links(soup, url)
+                text, html = self.extract_text_and_html(soup)
+
                 if len(text) > 100:
                     self.scraped_data.append({
                         'url': url,
@@ -197,53 +156,39 @@ class AUBLibraryScraper:
         return []
 
     def crawl(self, max_pages=MAX_PAGES):
-        """Crawl the website using BFS with a headless browser."""
         print(f"Starting crawl from {self.start_urls}")
         print(f"Max pages: {max_pages}")
 
         pbar = tqdm(total=max_pages, desc="Crawling pages")
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            # Set realistic user-agent and Beirut timezone so JS-rendered
-            # times (e.g. opening hours) display as they appear on the site.
-            context = browser.new_context(
-                user_agent=USER_AGENT,
-                timezone_id="Asia/Beirut",
-            )
-            page = context.new_page()
+        while self.to_visit and len(self.visited) < max_pages:
+            url = self.to_visit.popleft()
 
-            while self.to_visit and len(self.visited) < max_pages:
-                url = self.to_visit.popleft()
+            if url in self.visited:
+                continue
 
-                if url in self.visited:
-                    continue
+            self.visited.add(url)
+            self.visited_base.add(self.normalize_url(url))
+            pbar.update(1)
+            pbar.set_postfix({'current': url[:50] + '...' if len(url) > 50 else url})
 
-                self.visited.add(url)
-                self.visited_base.add(self.normalize_url(url))
-                pbar.update(1)
-                pbar.set_postfix({'current': url[:50] + '...' if len(url) > 50 else url})
+            new_links = self.scrape_page(url)
 
-                new_links = self.scrape_page(page, url)
+            for link in new_links:
+                if link not in self.visited:
+                    self.to_visit.append(link)
 
-                for link in new_links:
-                    if link not in self.visited:
-                        self.to_visit.append(link)
-
-                time.sleep(CRAWL_DELAY)
-
-            browser.close()
+            time.sleep(CRAWL_DELAY)
 
         pbar.close()
         print(f"\nCrawl complete!")
         print(f"Pages visited: {len(self.visited)}")
         print(f"Pages with content: {len(self.scraped_data)}")
 
-        # Print failure summary
         if self.failed_pages:
             print(f"\nFailed pages: {len(self.failed_pages)}")
             print("\nFailed URLs:")
-            for failure in self.failed_pages[:10]:  # Show first 10 failures
+            for failure in self.failed_pages[:10]:
                 print(f"  - {failure['url']}")
                 print(f"    Error: {failure['error']}")
             if len(self.failed_pages) > 10:
@@ -255,10 +200,7 @@ class AUBLibraryScraper:
 
 
 def build_library_index(scraped_data):
-    """Build PostgreSQL tables from scraped data using the full chunk pipeline.
-
-    Truncates and rebuilds both document_chunks and library_pages tables.
-    """
+    """Build PostgreSQL tables from scraped data using the full chunk pipeline."""
     from backend.index_builder import IndexBuilder
 
     print("\n" + "="*60)
@@ -277,9 +219,8 @@ def build_library_index(scraped_data):
 
 
 def main():
-    """Main execution function."""
     print("="*60)
-    print("AUB Library Website Scraper (Playwright)")
+    print("AUB Library Website Scraper (requests + BeautifulSoup)")
     print("="*60)
 
     if not os.environ.get("OPENAI_API_KEY"):
@@ -288,7 +229,6 @@ def main():
         print("export OPENAI_API_KEY='your-api-key-here'")
         return
 
-    # Initialize database
     init_db()
 
     scraper = AUBLibraryScraper(
