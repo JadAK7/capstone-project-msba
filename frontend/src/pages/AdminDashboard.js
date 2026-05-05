@@ -29,6 +29,8 @@ import {
   getAnalyticsSummary,
   getAnalyticsTrends,
   getTopQueries,
+  getUnansweredQueries,
+  answerUnansweredQuery,
   getAnalyticsCharts,
   getConversations,
   deleteConversation,
@@ -1032,23 +1034,39 @@ function DataManagementTab({ scraping, onRescrape }) {
 function AnalyticsTab() {
   const [summary, setSummary] = useState(null);
   const [topQueries, setTopQueries] = useState([]);
+  const [unanswered, setUnanswered] = useState({ queries: [], total_unanswered: 0, total_queries: 0 });
   const [chartData, setChartData] = useState(null);
   const [extendedSummary, setExtendedSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [chartsLoading, setChartsLoading] = useState(false);
   const [toast, setToast] = useState(null);
+  // Inline answer-form state, keyed by query string
+  const [openAnswerFor, setOpenAnswerFor] = useState(null);
+  const [answerText, setAnswerText] = useState('');
+  const [savingAnswer, setSavingAnswer] = useState(false);
+
+  const reloadUnanswered = useCallback(async () => {
+    try {
+      const u = await getUnansweredQueries();
+      setUnanswered(u);
+    } catch (err) {
+      setToast({ message: `Failed to refresh unanswered queries: ${err.message}`, type: 'error' });
+    }
+  }, []);
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       try {
-        const [s, q, c] = await Promise.all([
+        const [s, q, u, c] = await Promise.all([
           getAnalyticsSummary(),
           getTopQueries(),
+          getUnansweredQueries(),
           getAnalyticsCharts(),
         ]);
         setSummary(s);
         setTopQueries(q);
+        setUnanswered(u);
         setChartData(c.charts || {});
         setExtendedSummary(c.extended_summary || {});
       } catch (err) {
@@ -1059,6 +1077,36 @@ function AnalyticsTab() {
     };
     load();
   }, []);
+
+  const handleOpenAnswer = (query) => {
+    if (openAnswerFor === query) {
+      setOpenAnswerFor(null);
+      setAnswerText('');
+    } else {
+      setOpenAnswerFor(query);
+      setAnswerText('');
+    }
+  };
+
+  const handleSaveAnswer = async (query) => {
+    const trimmed = answerText.trim();
+    if (!trimmed) {
+      setToast({ message: 'Answer cannot be empty.', type: 'error' });
+      return;
+    }
+    setSavingAnswer(true);
+    try {
+      await answerUnansweredQuery(query, trimmed);
+      setToast({ message: 'Answer saved as a custom note. The chatbot can now answer this question.', type: 'success' });
+      setOpenAnswerFor(null);
+      setAnswerText('');
+      await reloadUnanswered();
+    } catch (err) {
+      setToast({ message: `Failed to save answer: ${err.message}`, type: 'error' });
+    } finally {
+      setSavingAnswer(false);
+    }
+  };
 
   const handleRefreshCharts = async () => {
     setChartsLoading(true);
@@ -1180,6 +1228,109 @@ function AnalyticsTab() {
         </div>
       ) : (
         <div className="admin-empty">No queries recorded yet.</div>
+      )}
+
+      {/* ---- Unanswered (knowledge gap) Queries ---- */}
+      <h3 className="admin-section-title" style={{ marginTop: '2rem' }}>
+        Unanswered Queries
+        {unanswered.total_unanswered > 0 && (
+          <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: '#840132', fontWeight: 600 }}>
+            ({unanswered.total_unanswered} total)
+          </span>
+        )}
+      </h3>
+      <div style={{
+        backgroundColor: '#f5f0f1',
+        borderLeft: '4px solid #840132',
+        padding: '10px 14px',
+        borderRadius: '4px',
+        marginBottom: '1rem',
+        fontSize: '0.88rem',
+        color: '#444',
+      }}>
+        Library-related questions the chatbot abstained on (low retrieval confidence).
+        Click <strong>Answer</strong> to write a response — it gets saved as a custom note
+        and indexed into the knowledge base immediately.
+      </div>
+      {unanswered.queries && unanswered.queries.length > 0 ? (
+        <div className="admin-table-wrapper">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Query</th>
+                <th>Asked</th>
+                <th>Last Asked</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {unanswered.queries.map((q, i) => (
+                <React.Fragment key={i}>
+                  <tr>
+                    <td>{i + 1}</td>
+                    <td className="admin-td-text">{q.query}</td>
+                    <td>{q.count}</td>
+                    <td className="admin-td-text admin-card-value-small">
+                      {q.last_asked ? q.last_asked.slice(0, 10) : ''}
+                    </td>
+                    <td>
+                      <button
+                        className="admin-btn admin-btn-sm admin-btn-secondary"
+                        onClick={() => handleOpenAnswer(q.query)}
+                      >
+                        {openAnswerFor === q.query ? 'Cancel' : 'Answer'}
+                      </button>
+                    </td>
+                  </tr>
+                  {openAnswerFor === q.query && (
+                    <tr>
+                      <td colSpan={5} style={{ backgroundColor: '#fafafa', padding: '12px 16px' }}>
+                        <div style={{ marginBottom: '6px', fontWeight: 600, fontSize: '0.9rem', color: '#333' }}>
+                          Write the answer for: <em>{q.query}</em>
+                        </div>
+                        <textarea
+                          rows={5}
+                          style={{
+                            width: '100%',
+                            padding: '8px',
+                            border: '1px solid #ccc',
+                            borderRadius: '4px',
+                            fontFamily: 'inherit',
+                            fontSize: '0.92rem',
+                            resize: 'vertical',
+                          }}
+                          value={answerText}
+                          onChange={(e) => setAnswerText(e.target.value)}
+                          placeholder="Type the librarian-approved answer here. It will be saved as a custom note in the knowledge base."
+                          autoFocus
+                        />
+                        <div style={{ marginTop: '8px', display: 'flex', gap: '8px' }}>
+                          <button
+                            className="admin-btn admin-btn-primary"
+                            onClick={() => handleSaveAnswer(q.query)}
+                            disabled={savingAnswer || !answerText.trim()}
+                          >
+                            {savingAnswer ? 'Saving...' : 'Save to Knowledge Base'}
+                          </button>
+                          <button
+                            className="admin-btn admin-btn-secondary"
+                            onClick={() => handleOpenAnswer(q.query)}
+                            disabled={savingAnswer}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="admin-empty">No unanswered queries yet.</div>
       )}
 
     </div>

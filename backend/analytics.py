@@ -317,20 +317,26 @@ class AnalyticsComputer:
             return []
 
     def unanswered_queries(self, limit: int = 50) -> dict:
-        """Return queries the bot could not answer (chosen_source = 'none (unclear)')."""
+        """Return relevant (in-scope) queries the bot could not answer.
+
+        These are queries the chatbot abstained on because retrieval context
+        was below the confidence threshold — but the input guards did NOT
+        flag them as out-of-scope, so they are legitimate library questions
+        the knowledge base is missing answers for.
+        """
         try:
             with get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Total counts
                     cur.execute("SELECT COUNT(*) FROM chat_conversations")
                     total_queries = cur.fetchone()[0]
 
                     cur.execute(
-                        "SELECT COUNT(*) FROM chat_conversations WHERE chosen_source = 'none (unclear)'"
+                        """SELECT COUNT(*) FROM chat_conversations
+                           WHERE chosen_source = 'none (below threshold)'
+                             AND COALESCE(guard_out_of_scope, FALSE) = FALSE"""
                     )
                     total_unanswered = cur.fetchone()[0]
 
-                    # Grouped unanswered queries
                     cur.execute(
                         """SELECT LOWER(TRIM(query)) AS q,
                                   COUNT(*) AS count,
@@ -340,7 +346,8 @@ class AnalyticsComputer:
                                   MAX(db_top_score) AS db_top_score,
                                   MAX(library_top_score) AS library_top_score
                            FROM chat_conversations
-                           WHERE chosen_source = 'none (unclear)'
+                           WHERE chosen_source = 'none (below threshold)'
+                             AND COALESCE(guard_out_of_scope, FALSE) = FALSE
                              AND query IS NOT NULL AND TRIM(query) != ''
                            GROUP BY LOWER(TRIM(query))
                            ORDER BY count DESC, last_asked DESC
@@ -420,7 +427,7 @@ class AnalyticsComputer:
 
         cache_hits = sum(1 for e in entries if e.get("cache_hit"))
         unanswered = sum(
-            1 for e in entries if e.get("intent_source") == "none (unclear)"
+            1 for e in entries if e.get("intent_source") == "none (below threshold)"
         )
 
         word_counts = [e.get("query_word_count", 0) for e in entries]

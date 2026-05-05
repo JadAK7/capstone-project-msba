@@ -1227,20 +1227,6 @@ class LibraryChatbot:
             else:
                 answer = "I can only answer questions about AUB library services and resources."
 
-        # Append source attribution
-        if sources:
-            templates = _RESPONSE_TEMPLATES[lang]
-            source_links = []
-            for s in sources:
-                link_text = s["title"]
-                if s.get("section"):
-                    link_text += f" > {s['section']}"
-                if s["url"]:
-                    source_links.append(f"[{link_text}]({s['url']})")
-                else:
-                    source_links.append(link_text)
-            answer += f"\n\n{templates['sources_label']} {' | '.join(source_links)}"
-
         return {
             "answer": answer,
             "context_sent": context,
@@ -1375,20 +1361,6 @@ class LibraryChatbot:
             partial_context=partial_context or answer_level == "PARTIAL",
             history_msgs=history_msgs,
         )
-
-        # Append source attribution
-        if sources:
-            templates = _RESPONSE_TEMPLATES[lang]
-            source_links = []
-            for s in sources:
-                link_text = s["title"]
-                if s.get("section"):
-                    link_text += f" > {s['section']}"
-                if s["url"]:
-                    source_links.append(f"[{link_text}]({s['url']})")
-                else:
-                    source_links.append(link_text)
-            answer += f"\n\n{templates['sources_label']} {' | '.join(source_links)}"
 
         return {
             "answer": answer,
