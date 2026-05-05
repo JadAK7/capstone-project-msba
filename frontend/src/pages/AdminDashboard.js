@@ -1034,39 +1034,23 @@ function DataManagementTab({ scraping, onRescrape }) {
 function AnalyticsTab() {
   const [summary, setSummary] = useState(null);
   const [topQueries, setTopQueries] = useState([]);
-  const [unanswered, setUnanswered] = useState({ queries: [], total_unanswered: 0, total_queries: 0 });
   const [chartData, setChartData] = useState(null);
   const [extendedSummary, setExtendedSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [chartsLoading, setChartsLoading] = useState(false);
   const [toast, setToast] = useState(null);
-  // Inline answer-form state, keyed by query string
-  const [openAnswerFor, setOpenAnswerFor] = useState(null);
-  const [answerText, setAnswerText] = useState('');
-  const [savingAnswer, setSavingAnswer] = useState(false);
-
-  const reloadUnanswered = useCallback(async () => {
-    try {
-      const u = await getUnansweredQueries();
-      setUnanswered(u);
-    } catch (err) {
-      setToast({ message: `Failed to refresh unanswered queries: ${err.message}`, type: 'error' });
-    }
-  }, []);
 
   useEffect(() => {
     const load = async () => {
       setLoading(true);
       try {
-        const [s, q, u, c] = await Promise.all([
+        const [s, q, c] = await Promise.all([
           getAnalyticsSummary(),
           getTopQueries(),
-          getUnansweredQueries(),
           getAnalyticsCharts(),
         ]);
         setSummary(s);
         setTopQueries(q);
-        setUnanswered(u);
         setChartData(c.charts || {});
         setExtendedSummary(c.extended_summary || {});
       } catch (err) {
@@ -1077,36 +1061,6 @@ function AnalyticsTab() {
     };
     load();
   }, []);
-
-  const handleOpenAnswer = (query) => {
-    if (openAnswerFor === query) {
-      setOpenAnswerFor(null);
-      setAnswerText('');
-    } else {
-      setOpenAnswerFor(query);
-      setAnswerText('');
-    }
-  };
-
-  const handleSaveAnswer = async (query) => {
-    const trimmed = answerText.trim();
-    if (!trimmed) {
-      setToast({ message: 'Answer cannot be empty.', type: 'error' });
-      return;
-    }
-    setSavingAnswer(true);
-    try {
-      await answerUnansweredQuery(query, trimmed);
-      setToast({ message: 'Answer saved as a custom note. The chatbot can now answer this question.', type: 'success' });
-      setOpenAnswerFor(null);
-      setAnswerText('');
-      await reloadUnanswered();
-    } catch (err) {
-      setToast({ message: `Failed to save answer: ${err.message}`, type: 'error' });
-    } finally {
-      setSavingAnswer(false);
-    }
-  };
 
   const handleRefreshCharts = async () => {
     setChartsLoading(true);
@@ -1230,8 +1184,83 @@ function AnalyticsTab() {
         <div className="admin-empty">No queries recorded yet.</div>
       )}
 
-      {/* ---- Unanswered (knowledge gap) Queries ---- */}
-      <h3 className="admin-section-title" style={{ marginTop: '2rem' }}>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Unanswered Queries Tab
+// ---------------------------------------------------------------------------
+function UnansweredQueriesTab() {
+  const [unanswered, setUnanswered] = useState({ queries: [], total_unanswered: 0, total_queries: 0 });
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState(null);
+  // Inline answer-form state, keyed by query string
+  const [openAnswerFor, setOpenAnswerFor] = useState(null);
+  const [answerText, setAnswerText] = useState('');
+  const [savingAnswer, setSavingAnswer] = useState(false);
+
+  const reloadUnanswered = useCallback(async () => {
+    try {
+      const u = await getUnansweredQueries();
+      setUnanswered(u);
+    } catch (err) {
+      setToast({ message: `Failed to refresh unanswered queries: ${err.message}`, type: 'error' });
+    }
+  }, []);
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      try {
+        const u = await getUnansweredQueries();
+        setUnanswered(u);
+      } catch (err) {
+        setToast({ message: `Failed to load unanswered queries: ${err.message}`, type: 'error' });
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const handleOpenAnswer = (query) => {
+    if (openAnswerFor === query) {
+      setOpenAnswerFor(null);
+      setAnswerText('');
+    } else {
+      setOpenAnswerFor(query);
+      setAnswerText('');
+    }
+  };
+
+  const handleSaveAnswer = async (query) => {
+    const trimmed = answerText.trim();
+    if (!trimmed) {
+      setToast({ message: 'Answer cannot be empty.', type: 'error' });
+      return;
+    }
+    setSavingAnswer(true);
+    try {
+      await answerUnansweredQuery(query, trimmed);
+      setToast({ message: 'Answer saved as a custom note. The chatbot can now answer this question.', type: 'success' });
+      setOpenAnswerFor(null);
+      setAnswerText('');
+      await reloadUnanswered();
+    } catch (err) {
+      setToast({ message: `Failed to save answer: ${err.message}`, type: 'error' });
+    } finally {
+      setSavingAnswer(false);
+    }
+  };
+
+  if (loading) return <div className="admin-loading">Loading unanswered queries...</div>;
+
+  return (
+    <div className="admin-tab-content">
+      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+
+      <h3 className="admin-section-title">
         Unanswered Queries
         {unanswered.total_unanswered > 0 && (
           <span style={{ marginLeft: '0.5rem', fontSize: '0.85rem', color: '#840132', fontWeight: 600 }}>
@@ -1332,7 +1361,6 @@ function AnalyticsTab() {
       ) : (
         <div className="admin-empty">No unanswered queries yet.</div>
       )}
-
     </div>
   );
 }
@@ -2124,6 +2152,12 @@ function AdminDashboard() {
             Analytics
           </button>
           <button
+            className={`admin-tab ${activeTab === 'unanswered' ? 'active' : ''}`}
+            onClick={() => setActiveTab('unanswered')}
+          >
+            Unanswered Queries
+          </button>
+          <button
             className={`admin-tab ${activeTab === 'conversations' ? 'active' : ''}`}
             onClick={() => setActiveTab('conversations')}
           >
@@ -2147,6 +2181,7 @@ function AdminDashboard() {
         )}
         {activeTab === 'data' && <DataManagementTab scraping={scraping} onRescrape={handleRescrape} />}
         {activeTab === 'analytics' && <AnalyticsTab />}
+        {activeTab === 'unanswered' && <UnansweredQueriesTab />}
         {activeTab === 'conversations' && <ConversationsTab />}
         {activeTab === 'escalations' && <EscalationsTab />}
       </div>
