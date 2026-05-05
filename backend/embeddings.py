@@ -28,37 +28,102 @@ logger = logging.getLogger(__name__)
 # Model selection via environment variable
 #
 #   OPENAI_EMBEDDING_MODEL=text-embedding-3-small   (default, 1536 dims)
-#   OPENAI_EMBEDDING_MODEL=text-embedding-3-large   (3072 dims, higher quality)
+#   OPENAI_EMBEDDING_MODEL=text-embedding-3-large   (1536 dims by default,
+#                                                    capped via `dimensions`
+#                                                    API parameter; native is
+#                                                    3072 but pgvector's HNSW
+#                                                    index has a 2000-dim cap)
 #
-# Changing the model requires a full re-index (python scripts/build_index.py)
-# because existing vectors in the database have a different dimension.
-# The database layer detects the mismatch on startup and auto-migrates.
+#   OPENAI_EMBEDDING_DIMENSIONS  Optional override. For -3-* models, you can
+#                                request any dimension <= the model's native
+#                                size (256, 512, 1024, 1536, 2000, 3072). The
+#                                output is L2-normalized so smaller dims still
+#                                work as drop-in cosine-similarity vectors.
+#                                Must be <= 2000 if using HNSW indexes.
+#
+# Changing the model OR the dimensions requires a full re-index
+# (python scripts/build_index.py). The database layer detects mismatches and
+# auto-migrates the schema on next startup.
 # ---------------------------------------------------------------------------
 
-_MODEL_DIMS: dict = {
+# Native dimensions per model (used to validate user overrides)
+_NATIVE_DIMS: dict = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
 }
 
+# Default *output* dim per model. We cap large at 1536 so it fits pgvector
+# HNSW (2000-dim limit) and matches small for an apples-to-apples comparison.
+_DEFAULT_DIMS: dict = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 1536,  # capped from 3072 native
+    "text-embedding-ada-002": 1536,
+}
+
+# pgvector HNSW index limit
+_HNSW_MAX_DIM = 2000
+
 
 def _resolve_embedding_config() -> tuple:
     raw = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small").strip()
     model = raw.lower()
-    if model not in _MODEL_DIMS:
+    if model not in _NATIVE_DIMS:
         logger.warning(
             "Unknown OPENAI_EMBEDDING_MODEL '%s'; supported values: %s. "
             "Defaulting to text-embedding-3-small.",
             raw,
-            list(_MODEL_DIMS),
+            list(_NATIVE_DIMS),
         )
         model = "text-embedding-3-small"
-    dim = _MODEL_DIMS[model]
-    logger.info("Embedding model: %s  (%d dimensions)", model, dim)
-    return model, dim
+
+    native = _NATIVE_DIMS[model]
+    default_dim = _DEFAULT_DIMS[model]
+
+    # Allow user override
+    dim_override = os.environ.get("OPENAI_EMBEDDING_DIMENSIONS", "").strip()
+    if dim_override:
+        try:
+            dim = int(dim_override)
+        except ValueError:
+            logger.warning(
+                "Invalid OPENAI_EMBEDDING_DIMENSIONS '%s'; using default %d.",
+                dim_override, default_dim,
+            )
+            dim = default_dim
+        else:
+            if dim < 1 or dim > native:
+                logger.warning(
+                    "OPENAI_EMBEDDING_DIMENSIONS=%d is out of range for %s "
+                    "(1..%d). Using default %d.",
+                    dim, model, native, default_dim,
+                )
+                dim = default_dim
+            elif dim > _HNSW_MAX_DIM:
+                logger.warning(
+                    "OPENAI_EMBEDDING_DIMENSIONS=%d exceeds pgvector HNSW "
+                    "limit (%d). Indexing will fail unless you switch to "
+                    "ivfflat or no index.",
+                    dim, _HNSW_MAX_DIM,
+                )
+    else:
+        dim = default_dim
+
+    # Whether we need to send the `dimensions` API parameter. ada-002 doesn't
+    # support it; -3-* models do but only when dim != native we send it (for
+    # cleanliness — sending dimensions=native is harmless but redundant).
+    use_dim_param = model.startswith("text-embedding-3-") and dim != native
+
+    logger.info(
+        "Embedding model: %s  (output dim=%d%s, native=%d)",
+        model, dim,
+        " via dimensions= API param" if use_dim_param else "",
+        native,
+    )
+    return model, dim, use_dim_param
 
 
-EMBEDDING_MODEL, EMBEDDING_DIM = _resolve_embedding_config()
+EMBEDDING_MODEL, EMBEDDING_DIM, _USE_DIMENSIONS_PARAM = _resolve_embedding_config()
 
 _MAX_INPUT_TOKENS = 8192
 _MAX_ITEMS_PER_REQUEST = 2048
@@ -114,8 +179,15 @@ def _sanitize(text: str) -> str:
 
 
 def _is_retryable_embed(exc: Exception) -> bool:
-    err = str(exc)
-    if "429" in err:
+    """Retry on rate-limits, 5xx, transient connection drops, and timeouts."""
+    cls_name = type(exc).__name__.lower()
+    if any(token in cls_name for token in
+           ("connection", "timeout", "apiconnection", "apitimeout")):
+        return True
+    err = str(exc).lower()
+    if "429" in err or "rate limit" in err:
+        return True
+    if "connection error" in err or "timed out" in err or "timeout" in err:
         return True
     for code in ("500", "502", "503", "504"):
         if code in err:
@@ -124,15 +196,18 @@ def _is_retryable_embed(exc: Exception) -> bool:
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=8),
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
     retry=retry_if_exception(_is_retryable_embed),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
 def _call_api(client: OpenAI, batch: List[str]) -> List[List[float]]:
     """Single tenacity-wrapped embedding API call."""
-    resp = client.embeddings.create(input=batch, model=EMBEDDING_MODEL)
+    kwargs = {"input": batch, "model": EMBEDDING_MODEL}
+    if _USE_DIMENSIONS_PARAM:
+        kwargs["dimensions"] = EMBEDDING_DIM
+    resp = client.embeddings.create(**kwargs)
     return [item.embedding for item in resp.data]
 
 

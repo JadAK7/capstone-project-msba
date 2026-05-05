@@ -199,6 +199,11 @@ class CustomNoteRequest(BaseModel):
     content: str
 
 
+class UnansweredAnswerRequest(BaseModel):
+    query: str
+    answer: str
+
+
 class FeedbackRequest(BaseModel):
     conversation_id: int
     rating: int  # 1 = thumbs up, -1 = thumbs down
@@ -854,6 +859,30 @@ def analytics_unanswered_queries():
     """Return queries the bot could not answer."""
     try:
         return _analytics.unanswered_queries(limit=50)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/analytics/unanswered-queries/answer")
+def analytics_answer_unanswered_query(
+    req: UnansweredAnswerRequest,
+    _user: str = Depends(require_admin),
+):
+    """Persist an admin-authored answer for an unanswered query as a custom note.
+
+    The query becomes the note's label, the admin's answer becomes its content.
+    Goes through the standard custom-note pipeline (chunk + embed + index),
+    so it is immediately retrievable by the chatbot.
+    """
+    query = req.query.strip()
+    answer = req.answer.strip()
+    if not query or not answer:
+        raise HTTPException(status_code=400, detail="Both query and answer are required.")
+    try:
+        mgr = get_admin_manager()
+        result = mgr.add_custom_note(query, answer)
+        _invalidate_cache_after_edit()
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

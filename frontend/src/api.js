@@ -422,6 +422,14 @@ export async function getUnansweredQueries() {
   return res.json();
 }
 
+export async function answerUnansweredQuery(query, answer) {
+  const res = await adminFetch(`${API_BASE}/api/admin/analytics/unanswered-queries/answer`, {
+    method: 'POST', headers: adminHeaders(), body: JSON.stringify({ query, answer }),
+  });
+  if (!res.ok) { const e = await res.text(); throw new Error(`Failed to save answer: ${res.status} - ${e}`); }
+  return res.json();
+}
+
 export async function getAnalyticsCharts() {
   const res = await adminFetch(`${API_BASE}/api/admin/analytics/charts`, { headers: adminHeadersNoBody() });
   if (!res.ok) throw new Error(`Failed to fetch analytics charts: ${res.status}`);

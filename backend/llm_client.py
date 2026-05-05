@@ -155,8 +155,15 @@ def _get_anthropic_client():
 # ---------------------------------------------------------------------------
 
 def _is_retryable(exc: Exception) -> bool:
-    err = str(exc)
-    if "429" in err:
+    """Retry on rate-limits, 5xx, transient connection drops, and timeouts."""
+    cls_name = type(exc).__name__.lower()
+    if any(token in cls_name for token in
+           ("connection", "timeout", "apiconnection", "apitimeout")):
+        return True
+    err = str(exc).lower()
+    if "429" in err or "rate limit" in err:
+        return True
+    if "connection error" in err or "timed out" in err or "timeout" in err:
         return True
     for code in ("500", "502", "503", "504"):
         if code in err:
@@ -248,8 +255,8 @@ def _call_openai(
     client = _get_openai_client()
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=8),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception(_is_retryable),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
@@ -303,8 +310,8 @@ def _call_anthropic(
         kwargs["system"] = system_text
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=8),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception(_is_retryable),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
