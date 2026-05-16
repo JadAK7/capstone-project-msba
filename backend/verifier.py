@@ -17,9 +17,7 @@ from .llm_client import chat_completion, LLMUnavailableError
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Post-generation safety check (fast, regex-based)
-# ---------------------------------------------------------------------------
 
 # Patterns in a generated answer that indicate the model broke role or followed
 # a malicious instruction embedded in the user query.
@@ -61,9 +59,7 @@ def check_output_safety(answer: str) -> Tuple[bool, str]:
     return True, ""
 
 
-# ---------------------------------------------------------------------------
 # Claim verification (LLM-based)
-# ---------------------------------------------------------------------------
 
 def verify_answer(
     query: str,
@@ -116,7 +112,7 @@ def verify_answer(
 
                         "Your job is to verify that every factual claim in a draft answer is "
                         "EXPLICITLY supported by the provided context passages. "
-                        "You must be aggressive about catching unsupported content — "
+                        "You must be aggressive about catching unsupported content, "
                         "false negatives (letting a hallucination through) are far worse than "
                         "false positives (flagging a supported claim).\n\n"
                         "Instructions:\n"
@@ -141,9 +137,9 @@ def verify_answer(
                         "Preserve markdown formatting and source citations. "
                         "If you must remove significant content, add: \"For more details, please "
                         "contact the library directly.\"\n"
-                        '   - "removed_claims": array of strings — each unsupported claim that was removed.\n'
-                        '   - "all_supported": boolean — true if nothing was removed.\n'
-                        '   - "safety_violation": boolean — true if the answer broke its library-assistant role.\n\n'
+                        '   - "removed_claims": array of strings, each unsupported claim that was removed.\n'
+                        '   - "all_supported": boolean, true if nothing was removed.\n'
+                        '   - "safety_violation": boolean, true if the answer broke its library-assistant role.\n\n'
                         "When in doubt about whether a claim is supported, REMOVE it. "
                         "It is better to give a shorter, accurate answer than a longer, hallucinated one.\n\n"
                         "If ALL claims are unsupported or there is a safety violation, set "
@@ -169,7 +165,7 @@ def verify_answer(
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not json_match:
             # JSON parse failure = verification didn't happen.
-            # Treat as suspicious — return draft with a disclaimer.
+            # Treat as suspicious, return draft with a disclaimer.
             logger.warning("Verifier: could not parse JSON response, adding disclaimer")
             disclaimer = (
                 "\n\n*Note: This information could not be fully verified. "
@@ -184,7 +180,7 @@ def verify_answer(
         safety_violation = result.get("safety_violation", False)
 
         if safety_violation:
-            logger.warning("Verifier detected safety violation in LLM output — replacing with refusal")
+            logger.warning("Verifier detected safety violation in LLM output, replacing with refusal")
             if lang == "ar":
                 verified = (
                     "يمكنني فقط الإجابة على الأسئلة المتعلقة بخدمات وموارد مكتبة "
@@ -221,7 +217,7 @@ def verify_answer(
 
     except Exception as e:
         # Fail-safe: if verification fails, do NOT return the unverified
-        # draft — it may contain hallucinations.  Fall back to the raw
+        # draft, it may contain hallucinations.  Fall back to the raw
         # context text from the top chunk (which is grounded by definition)
         # with a disclaimer.
         logger.warning(f"Verification failed, using safe fallback: {e}")
@@ -241,12 +237,10 @@ def verify_answer(
         return fallback, ["VERIFICATION_ERROR: verifier call failed, using cautious fallback"]
 
 
-# ---------------------------------------------------------------------------
 # Repair loop: revise a flagged answer using only supported context, then
 # re-verify. Reduces verifier false-positives by giving the model a chance to
 # rewrite a coherent answer instead of immediately accepting a stripped-down
 # or abstention output.
-# ---------------------------------------------------------------------------
 
 # Sentinels in `removed_claims` that indicate the verifier output should NOT
 # be repaired (safety violation, parse error, or our own repair markers).
@@ -316,7 +310,7 @@ def revise_answer(
                         "using ONLY facts that are explicitly stated in the context.\n\n"
                         "Rules:\n"
                         "1. Use ONLY information present in the context passages. Quote or "
-                        "closely paraphrase — do not paraphrase loosely.\n"
+                        "closely paraphrase, do not paraphrase loosely.\n"
                         "2. If the context does not address part of the question, explicitly "
                         "say you don't have that information rather than guessing.\n"
                         "3. Preserve markdown formatting from the draft (bold, lists, links).\n"
@@ -325,7 +319,7 @@ def revise_answer(
                         "6. Do NOT use hedging words (typically, usually, generally, likely, "
                         "probably). If a fact is in the context, state it; otherwise omit.\n"
                         "7. Do NOT invent new claims to replace removed ones.\n"
-                        "8. The revised answer should read fluently — not as fragments with "
+                        "8. The revised answer should read fluently, not as fragments with "
                         "obvious gaps. If you must omit a major aspect, smoothly note that "
                         "the information was not found.\n"
                         f"9. {lang_instruction}\n"
@@ -433,7 +427,7 @@ def verify_with_repair(
     verified_revised, removed_revised = verify_answer(query, revised, context, lang)
     repair_debug["revised_pass_removed"] = list(removed_revised)
 
-    # Revision now clean — accept it.
+    # Revision now clean, accept it.
     if not removed_revised:
         repair_debug["repair_outcome"] = "repair_succeeded"
         logger.info(

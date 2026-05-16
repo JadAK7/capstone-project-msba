@@ -75,9 +75,7 @@ class AdminManager:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    # ------------------------------------------------------------------
     # Collection browsing
-    # ------------------------------------------------------------------
 
     def list_collections(self) -> list:
         """Return list of collections with document counts."""
@@ -163,9 +161,7 @@ class AdminManager:
             "limit": limit,
         }
 
-    # ------------------------------------------------------------------
     # FAQ CRUD
-    # ------------------------------------------------------------------
 
     def _next_faq_id(self) -> str:
         with get_connection() as conn:
@@ -224,9 +220,7 @@ class AdminManager:
             conn.commit()
         return {"id": entry_id, "deleted": True}
 
-    # ------------------------------------------------------------------
     # Database CRUD
-    # ------------------------------------------------------------------
 
     def _next_db_id(self) -> str:
         with get_connection() as conn:
@@ -287,7 +281,6 @@ class AdminManager:
             conn.commit()
         return {"id": entry_id, "deleted": True}
 
-    # ------------------------------------------------------------------
     # Custom Notes CRUD (with chunking)
     #
     # A single admin note can contain multiple topics (hours, borrowing
@@ -302,7 +295,6 @@ class AdminManager:
     #     in the admin dashboard.  Its embedding covers the first chunk.
     #   - Extra chunk rows store individual pieces with focused embeddings.
     #   - Deleting/updating the base ID cascades to all its chunks.
-    # ------------------------------------------------------------------
 
     # Chunking config for custom notes
     _NOTE_CHUNK_SIZE = 600       # target chars per chunk
@@ -505,13 +497,11 @@ class AdminManager:
         self._delete_note_and_chunks(entry_id)
         return {"id": entry_id, "deleted": True}
 
-    # ------------------------------------------------------------------
     # Word Documents (stored in custom_notes with [DOC] label prefix)
     #
     # Uploaded .docx files are parsed to plain text, then chunked and
     # embedded exactly like custom notes.  The label is always prefixed
     # with "[DOC] " so they can be filtered separately in the admin UI.
-    # ------------------------------------------------------------------
 
     _DOC_PREFIX = "[DOC] "
 
@@ -546,9 +536,7 @@ class AdminManager:
         """Delete an uploaded document and all its chunks."""
         return self.delete_custom_note(entry_id)
 
-    # ------------------------------------------------------------------
     # Library Pages (read-only + delete)
-    # ------------------------------------------------------------------
 
     def delete_library_page(self, entry_id: str) -> dict:
         """Delete a library page entry."""
@@ -558,9 +546,7 @@ class AdminManager:
             conn.commit()
         return {"id": entry_id, "deleted": True}
 
-    # ------------------------------------------------------------------
     # System info
-    # ------------------------------------------------------------------
 
     def get_system_info(self) -> dict:
         """Return system information for the admin dashboard."""

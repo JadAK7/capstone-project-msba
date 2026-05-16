@@ -32,9 +32,7 @@ from .llm_client import chat_completion, LLMUnavailableError
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# LLM evaluation helper — routes through llm_client for retry + circuit breaker
-# ---------------------------------------------------------------------------
+# LLM evaluation helper, routes through llm_client for retry + circuit breaker
 
 def _llm_eval(prompt: str, max_tokens: int = 500) -> dict:
     """Call the configured chat model for evaluation scoring.
@@ -51,7 +49,7 @@ def _llm_eval(prompt: str, max_tokens: int = 500) -> dict:
                     "content": (
                         "You are a strict, calibrated RAG evaluation judge. "
                         "You score retrieval-augmented generation systems. "
-                        "Be critical — most real systems score between 0.4 and 0.85. "
+                        "Be critical, most real systems score between 0.4 and 0.85. "
                         "Perfect 1.0 scores should be extremely rare. "
                         "Scores below 0.3 indicate serious problems. "
                         "Always respond with ONLY valid JSON: "
@@ -85,17 +83,15 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
     return float(np.dot(a_arr, b_arr) / denom)
 
 
-# ---------------------------------------------------------------------------
 # Cross-lingual judge fix
-# ---------------------------------------------------------------------------
 # The LLM judge cannot reliably verify an Arabic answer against an English
-# context — it literally searches for the Arabic string in the English text
+# context, it literally searches for the Arabic string in the English text
 # and marks everything unsupported. We (1) tell the judge that cross-lingual
 # matches are valid in every prompt, and (2) pre-translate Arabic answers to
 # English before judging groundedness/faithfulness so the match is direct.
 
 _CROSS_LINGUAL_NOTE = (
-    "IMPORTANT — cross-lingual matching: the ANSWER and CONTEXT may be in "
+    "IMPORTANT, cross-lingual matching: the ANSWER and CONTEXT may be in "
     "different languages (for example, Arabic answer against English context). "
     "A claim is SUPPORTED if it expresses the same fact as something in the "
     "context, regardless of language. Translate mentally when checking. Do "
@@ -111,7 +107,7 @@ def _has_arabic(text: str) -> bool:
 def _translate_to_english(text: str) -> str:
     """Translate an Arabic answer to English for faithful cross-lingual judging.
 
-    Used only for groundedness/faithfulness scoring — the original answer is
+    Used only for groundedness/faithfulness scoring, the original answer is
     preserved for answer_relevance and for reporting. Falls back to the
     original text if the translation call fails.
     """
@@ -142,9 +138,7 @@ def _translate_to_english(text: str) -> str:
         return text
 
 
-# ---------------------------------------------------------------------------
-# 1. Groundedness — claim-level verification
-# ---------------------------------------------------------------------------
+# 1. Groundedness, claim-level verification
 
 def score_groundedness(query: str, context: str, answer: str) -> dict:
     """Score = fraction of claims in the answer that are supported by context.
@@ -162,9 +156,9 @@ def score_groundedness(query: str, context: str, answer: str) -> dict:
         "3. Count supported claims vs total claims.\n"
         "4. Score = supported_claims / total_claims.\n\n"
         "Scoring guide:\n"
-        "- 1.0: Every single claim traces to context (rare — be strict)\n"
+        "- 1.0: Every single claim traces to context (rare, be strict)\n"
         "- 0.7-0.9: Most claims supported, minor unsupported details\n"
-        "- 0.4-0.7: Mixed — some claims supported, some not\n"
+        "- 0.4-0.7: Mixed, some claims supported, some not\n"
         "- 0.0-0.4: Most claims have no basis in context\n\n"
         "Be strict: rephrasing is OK, but any added fact not in context is unsupported.\n"
         "If the answer says 'I don't have information', score 1.0 (no unsupported claims).\n\n"
@@ -177,9 +171,7 @@ def score_groundedness(query: str, context: str, answer: str) -> dict:
     return _llm_eval(prompt)
 
 
-# ---------------------------------------------------------------------------
-# 2. Faithfulness — inverse of hallucination
-# ---------------------------------------------------------------------------
+# 2. Faithfulness, inverse of hallucination
 
 def score_faithfulness(query: str, context: str, answer: str) -> dict:
     """Score = 1 - (fraction of answer content that introduces info outside context).
@@ -223,9 +215,7 @@ def score_faithfulness(query: str, context: str, answer: str) -> dict:
     return _llm_eval(prompt)
 
 
-# ---------------------------------------------------------------------------
-# 3. Hallucination Rate — derived from faithfulness (NOT independently scored)
-# ---------------------------------------------------------------------------
+# 3. Hallucination Rate, derived from faithfulness (NOT independently scored)
 
 def compute_hallucination_rate(faithfulness_score: float) -> dict:
     """Hallucination rate = 1 - faithfulness.
@@ -238,19 +228,17 @@ def compute_hallucination_rate(faithfulness_score: float) -> dict:
     """
     rate = round(1.0 - faithfulness_score, 4)
     if rate < 0.05:
-        reason = "Very low hallucination — answer is highly faithful to context"
+        reason = "Very low hallucination, answer is highly faithful to context"
     elif rate < 0.2:
-        reason = "Minor hallucination — small additions beyond context"
+        reason = "Minor hallucination, small additions beyond context"
     elif rate < 0.5:
-        reason = "Moderate hallucination — noticeable unsupported content"
+        reason = "Moderate hallucination, noticeable unsupported content"
     else:
-        reason = "High hallucination — significant fabricated content"
+        reason = "High hallucination, significant fabricated content"
     return {"score": rate, "reason": reason}
 
 
-# ---------------------------------------------------------------------------
-# 4. Context Relevance — hybrid: embedding + LLM
-# ---------------------------------------------------------------------------
+# 4. Context Relevance, hybrid: embedding + LLM
 
 def score_context_relevance(query: str, chunks: List[dict]) -> dict:
     """Score = how relevant the retrieved chunks are to the query.
@@ -276,7 +264,7 @@ def score_context_relevance(query: str, chunks: List[dict]) -> dict:
         "Scoring guide:\n"
         "- 1.0: Every chunk is directly relevant and useful for answering\n"
         "- 0.7-0.9: Most chunks are relevant, maybe one off-topic\n"
-        "- 0.4-0.7: Mixed relevance — some useful, some not\n"
+        "- 0.4-0.7: Mixed relevance, some useful, some not\n"
         "- 0.1-0.4: Mostly irrelevant chunks retrieved\n"
         "- 0.0: No chunk has any relevance to the question\n\n"
         + _CROSS_LINGUAL_NOTE +
@@ -302,9 +290,7 @@ def score_context_relevance(query: str, chunks: List[dict]) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
 # 5. Answer Relevance
-# ---------------------------------------------------------------------------
 
 def score_answer_relevance(query: str, answer: str) -> dict:
     """Score = how well the answer addresses the specific question asked."""
@@ -326,9 +312,7 @@ def score_answer_relevance(query: str, answer: str) -> dict:
     return _llm_eval(prompt)
 
 
-# ---------------------------------------------------------------------------
 # 6. Citation Accuracy
-# ---------------------------------------------------------------------------
 
 def score_citation_accuracy(answer: str, chunks: List[dict]) -> dict:
     """Score = correctness of cited sources in the answer.
@@ -341,7 +325,7 @@ def score_citation_accuracy(answer: str, chunks: List[dict]) -> dict:
     source_refs = re.findall(r"\[([^\]]+)\]\([^\)]+\)", answer)
 
     if not urls_in_answer and not source_refs:
-        return {"score": 1.0, "reason": "No citations in answer (N/A — not penalized)"}
+        return {"score": 1.0, "reason": "No citations in answer (N/A, not penalized)"}
 
     # Collect all text from chunks to match against
     chunk_urls = set()
@@ -385,9 +369,7 @@ def score_citation_accuracy(answer: str, chunks: List[dict]) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Combined grounding score
-# ---------------------------------------------------------------------------
 
 _GROUNDING_WEIGHTS = {
     "groundedness": 0.40,
@@ -410,9 +392,7 @@ def compute_grounding_score(
     )
 
 
-# ---------------------------------------------------------------------------
 # Consistency enforcement
-# ---------------------------------------------------------------------------
 
 def _enforce_consistency(metrics: dict) -> dict:
     """Post-process metric scores to eliminate logical contradictions.
@@ -429,7 +409,7 @@ def _enforce_consistency(metrics: dict) -> dict:
     cr = metrics["context_relevance"]["score"]
 
     # Rule 1: hallucination = 1 - faithfulness (already enforced by compute_hallucination_rate)
-    # (no action needed here — it's derived, not independent)
+    # (no action needed here, it's derived, not independent)
 
     # Rule 2: groundedness can't wildly exceed faithfulness
     # If answer adds lots of extra info (low faithfulness), groundedness should be limited
@@ -457,9 +437,7 @@ def _enforce_consistency(metrics: dict) -> dict:
     return metrics
 
 
-# ---------------------------------------------------------------------------
 # Full evaluation for a single query
-# ---------------------------------------------------------------------------
 
 def evaluate_single(
     query: str,
@@ -478,7 +456,7 @@ def evaluate_single(
             chunk filtering) that cause the evaluator to flag supported claims
             as hallucinations.
     """
-    # Use the actual generation context when available — this is what the
+    # Use the actual generation context when available, this is what the
     # LLM saw, so it's what faithfulness should be measured against.
     if context_sent_to_llm:
         context = context_sent_to_llm
@@ -529,7 +507,7 @@ def evaluate_single(
             )
 
     # Run the 4 independent metrics. Use the (possibly translated) answer
-    # only for groundedness/faithfulness — answer_relevance compares the
+    # only for groundedness/faithfulness, answer_relevance compares the
     # answer to the question and should stay in the original language.
     groundedness_result = score_groundedness(query, context, answer_for_grounding)
     faithfulness_result = score_faithfulness(query, context, answer_for_grounding)
@@ -586,9 +564,7 @@ def evaluate_single(
     }
 
 
-# ---------------------------------------------------------------------------
 # Batch evaluation pipeline
-# ---------------------------------------------------------------------------
 
 def run_evaluation_pipeline(
     questions: List[str],

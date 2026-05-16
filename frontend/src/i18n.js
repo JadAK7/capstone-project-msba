@@ -1,7 +1,7 @@
 const translations = {
   en: {
     headerTitle: 'AUB Libraries Assistant',
-    headerSubtitle: 'American University of Beirut — University Libraries',
+    headerSubtitle: 'American University of Beirut, University Libraries',
     subtitleBanner: {
       prefix: 'Get instant answers',
       suffix: ' to library questions and personalized database recommendations',
@@ -53,7 +53,7 @@ const translations = {
   },
   ar: {
     headerTitle: 'مساعد مكتبات الجامعة الأمريكية',
-    headerSubtitle: 'الجامعة الأمريكية في بيروت — مكتبات الجامعة',
+    headerSubtitle: 'الجامعة الأمريكية في بيروت, مكتبات الجامعة',
     subtitleBanner: {
       prefix: 'احصل على إجابات فورية',
       suffix: ' لأسئلة المكتبة وتوصيات قواعد بيانات مخصصة',

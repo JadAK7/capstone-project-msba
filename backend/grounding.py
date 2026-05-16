@@ -1,19 +1,19 @@
 """
-grounding.py — Pre-generation grounding checks and claim-level verification.
+grounding.py: pre-generation grounding checks and claim-level verification.
 
-This module implements the high-precision anti-hallucination pipeline:
+Pipeline:
+  1. Query risk classifier: flags high-risk query types (hours, contacts,
+     fees, dates, procedures) that need stricter evidence.
+  2. Answerability classifier: returns FULL / PARTIAL / NONE for the
+     retrieved context against the query.
+  3. Evidence planner: extracts the supportable claims from context BEFORE
+     generation, with the supporting snippet for each.
+  4. Generate-with-inline-verification: the model generates an answer
+     constrained by the evidence plan and verifies each claim inline in a
+     single LLM call (replaces a separate generation + post-hoc audit).
 
-1. Query risk classifier — detects high-risk query types that need
-   stricter evidence thresholds
-2. Answerability classifier (FULL / PARTIAL / NONE) — replaces binary YES/NO
-3. Evidence planner — extracts supportable claims BEFORE generation
-4. Generate-with-inline-verification — generates an answer constrained by
-   the evidence plan and verifies each claim inline in a single LLM call
-   (replaces the previous separate generation + post-generation audit)
-
-The key insight: hallucination happens when the model generates claims
-that have no direct textual support.  The fix is to make "no support → no claim"
-structurally impossible, not just instructed.
+The idea is to make "no support, no claim" structurally enforced rather than
+only requested in the system prompt.
 """
 
 import json
@@ -34,15 +34,15 @@ logger = logging.getLogger(__name__)
 # High-risk queries need stronger evidence because wrong answers cause
 # real harm (student shows up at wrong time, sends to wrong email, etc.)
 _HIGH_RISK_PATTERNS = [
-    # Schedule/hours — wrong times waste trips
+    # Schedule/hours, wrong times waste trips
     re.compile(r"\b(hours?|open(ing)?|clos(e|ing)|schedule|timing|when)\b", re.I),
-    # Contact info — wrong email/phone wastes time
+    # Contact info, wrong email/phone wastes time
     re.compile(r"\b(email|phone|contact|call|reach|address|location|direction)\b", re.I),
-    # Policies with consequences — wrong info causes penalties
+    # Policies with consequences, wrong info causes penalties
     re.compile(r"\b(fee|fine|penalty|deadline|overdue|renew|late|cost|price)\b", re.I),
-    # Specific procedures — wrong steps cause failures
+    # Specific procedures, wrong steps cause failures
     re.compile(r"\b(how\s+(?:to|do|can)|step|process|procedure|register|apply|request)\b", re.I),
-    # Dates — wrong dates cause missed deadlines
+    # Dates, wrong dates cause missed deadlines
     re.compile(r"\b(date|deadline|due|expire|until|before|after)\b", re.I),
 ]
 
@@ -112,7 +112,7 @@ def classify_answerability(
                         "the question, or only tangentially relates to the topic.\n\n"
                         "Be strict: 'related topic' ≠ 'answers the question'. "
                         "If the question asks 'What are the hours?' and context only says "
-                        "'the library is open to students', that is PARTIAL not FULL — "
+                        "'the library is open to students', that is PARTIAL not FULL, "
                         "it confirms the library exists but doesn't give hours."
                         f"{risk_note}"
                     ),
@@ -146,12 +146,12 @@ def classify_answerability(
         "level": "PARTIAL",
         "supported_parts": [],
         "missing_parts": ["classification failed"],
-        "reason": "Classifier error — defaulting to cautious mode",
+        "reason": "Classifier error, defaulting to cautious mode",
     }
 
 
 # ============================================================================
-# 3. Evidence planner — extract supportable claims BEFORE generation
+# 3. Evidence planner, extract supportable claims BEFORE generation
 # ============================================================================
 
 def plan_evidence(query: str, context: str) -> Dict:
@@ -272,7 +272,7 @@ def _generate_answer_raw(
     partial_note = ""
     if partial_context:
         partial_note = (
-            "\n\n⚠️ PARTIAL CONTEXT: Answer only the supported parts above. "
+            "\n\nPARTIAL CONTEXT: Answer only the supported parts above. "
             "Explicitly acknowledge missing information."
         )
 
@@ -312,8 +312,8 @@ def generate_and_verify(
 
     The LLM returns structured JSON with:
       - answer:   final markdown answer
-      - claims:   [{claim, chunk_id, confidence}] — chunk_id references [Chunk-N]
-      - verified: bool — LLM self-reports if all claims are grounded
+      - claims:   [{claim, chunk_id, confidence}], chunk_id references [Chunk-N]
+      - verified: bool, LLM self-reports if all claims are grounded
       - flags:    [] or list of issues found during self-check
       - removed_claims: claims excluded by the LLM
 
@@ -363,7 +363,7 @@ def generate_and_verify(
     partial_note = ""
     if partial_context:
         partial_note = (
-            "\n\n⚠️ PARTIAL CONTEXT: Only some aspects of the question are supported. "
+            "\n\nPARTIAL CONTEXT: Only some aspects of the question are supported. "
             "You MUST:\n"
             "- State ONLY the supported facts listed above\n"
             "- Explicitly say what information is missing\n"
@@ -549,7 +549,7 @@ SUPPORT_RERANK_PROMPT = (
     "You are an evidence judge for a university library chatbot. "
     "Given a user question and numbered text passages, score each passage on "
     "how well it provides DIRECT EVIDENCE to answer the question.\n\n"
-    "This is NOT about topic relevance — it is about answer support.\n"
+    "This is NOT about topic relevance, it is about answer support.\n"
     "A passage about 'library hours' is relevant to a question about hours, "
     "but only SUPPORTS the answer if it contains the actual hour values.\n\n"
     "Scoring guidelines:\n"

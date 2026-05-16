@@ -1,21 +1,21 @@
 # AUB Libraries Assistant
 
-A bilingual (Arabic & English) RAG-based chatbot for the American University of Beirut Libraries. Answers FAQs, recommends research databases, and synthesises responses from scraped library website content. Built on dense vector retrieval (pgvector cosine), LLM-based reranking (`gpt-4o-mini` relevance scoring), grounded generation, and post-generation claim verification — all guarded by an injection / scope filter and backed by a feedback loop that lets librarians correct bad answers.
+A bilingual (Arabic and English) RAG-based chatbot for the American University of Beirut Libraries. Answers FAQs, recommends research databases, and synthesises responses from scraped library website content. Built on dense vector retrieval (pgvector cosine), LLM-based reranking (`gpt-4o-mini` relevance scoring), grounded generation, and post-generation claim verification, all guarded by an injection and scope filter and backed by a feedback loop that lets librarians correct bad answers.
 
 ## Features
 
-- **Dense retrieval** — pgvector cosine over OpenAI `text-embedding-3-small` (1536-dim) with HNSW indexes. A hybrid scaffold (PostgreSQL FTS keyword path + Reciprocal Rank Fusion) is implemented but disabled in production after ablation showed no top-5 lift; see `backend/retriever.py`.
-- **Query rewriting** — LLM-based follow-up resolution, Arabic→English translation for retrieval, expansion of short queries
-- **LLM-based reranking** — `gpt-4o-mini` scores top-K candidates 0–1 for relevance (not a transformer cross-encoder); min-score threshold gates abstention
-- **Multi-source priority** — `custom_notes` (faculty text) > `document_chunks` (scraped pages) > `faq` > `databases`, with trust boosts applied at rerank time
-- **Grounded generation + claim verification** — Inline evidence-plan generation; abstain when context is insufficient; post-hoc verifier strips unsupported claims
-- **Input guards** — Regex + embedding-based prompt-injection detection and out-of-scope filtering
-- **Bilingual** — Per-message Arabic/English detection with RTL rendering; cross-lingual threshold offset for Arabic queries against English-indexed data
-- **Two-tier cache** — In-memory exact-key + semantic similarity (cosine ≥ 0.95) cache, persisted to disk between restarts
-- **Feedback loop** — Admin can correct answers; corrections retrieved by similarity (≥ 0.85) and replayed on near-duplicate questions
-- **Escalations** — Students can hand off questions to a librarian; admins respond from the dashboard
-- **Admin dashboard** — Auth-gated UI for collection CRUD, re-indexing, re-scraping, freshness checks, conversations, feedback, escalations, analytics, and 22 generated charts
-- **Per-stage latency instrumentation** — `StageTimer` records timing for every pipeline stage; surfaced in debug payload and analytics
+- **Dense retrieval**: pgvector cosine over OpenAI `text-embedding-3-small` (1536-dim) with HNSW indexes. A hybrid scaffold (PostgreSQL FTS keyword path + Reciprocal Rank Fusion) is implemented but disabled in production after ablation showed no top-5 lift; see `backend/retriever.py`.
+- **Query rewriting**: LLM-based follow-up resolution, Arabic-to-English translation for retrieval, expansion of short queries.
+- **LLM-based reranking**: `gpt-4o-mini` scores top-K candidates 0 to 1 for relevance (not a transformer cross-encoder); a min-score threshold gates abstention.
+- **Multi-source priority**: `custom_notes` (faculty text) > `document_chunks` (scraped pages) > `faq` > `databases`, with trust boosts applied at rerank time.
+- **Grounded generation + claim verification**: Inline evidence-plan generation; abstain when context is insufficient; a post-hoc verifier strips unsupported claims.
+- **Input guards**: Regex + embedding-based prompt-injection detection and out-of-scope filtering.
+- **Bilingual**: Per-message Arabic and English detection with RTL rendering; cross-lingual threshold offset for Arabic queries against English-indexed data.
+- **Two-tier cache**: In-memory exact-key + semantic similarity (cosine >= 0.95) cache, persisted to disk between restarts.
+- **Feedback loop**: Admins can correct answers; corrections are retrieved by similarity (>= 0.85) and replayed on near-duplicate questions.
+- **Escalations**: Students can hand off questions to a librarian; admins respond from the dashboard.
+- **Admin dashboard**: Auth-gated UI for collection CRUD, re-indexing, re-scraping, freshness checks, conversations, feedback, escalations, analytics, and 22 generated charts.
+- **Per-stage latency instrumentation**: `StageTimer` records timing for every pipeline stage; surfaced in the debug payload and analytics.
 
 ## Tech Stack
 
@@ -97,10 +97,10 @@ python scripts/build_index.py
 Two terminals (recommended for development):
 
 ```bash
-# Terminal 1 — backend (auto-builds indices if missing)
+# Terminal 1: backend (auto-builds indices if missing)
 uvicorn backend.main:app --reload --port 8000
 
-# Terminal 2 — frontend (proxies API to :8000)
+# Terminal 2: frontend (proxies API to :8000)
 cd frontend && npm start
 ```
 
@@ -121,7 +121,7 @@ FastAPI serves the React build and the API from the same port.
 python scripts/scrape_aub_library.py
 ```
 
-Re-scrape can also be triggered from the admin dashboard. Note: this is a static scraper — JS-rendered content (e.g. live opening hours) won't be captured; maintain those as FAQ entries or `custom_notes`.
+Re-scrape can also be triggered from the admin dashboard. Note: this is a static scraper. JS-rendered content (e.g. live opening hours) won't be captured; maintain those as FAQ entries or `custom_notes`.
 
 ### 6. (Optional) Content freshness check
 
@@ -146,7 +146,7 @@ python scripts/chat.py
 │   ├── intent_classifier.py       # Unified intent rules (EN + AR keyword regex)
 │   ├── retriever.py               # Hybrid vector + keyword retrieval + RRF
 │   ├── reranker.py                # LLM-based reranking, source-trust boosts
-│   ├── query_rewriter.py          # Follow-up resolution, AR→EN, expansion
+│   ├── query_rewriter.py          # Follow-up resolution, AR-to-EN, expansion
 │   ├── input_guard.py             # Injection detection + domain scope filter
 │   ├── grounding.py               # Answerability classifier + inline-verified generation
 │   ├── verifier.py                # Post-generation claim-level verification
@@ -156,10 +156,10 @@ python scripts/chat.py
 │   ├── llm_client.py              # Resilient chat-completion gateway (tenacity + breakers)
 │   ├── embeddings.py              # Centralized embedding generation
 │   ├── cache.py                   # Two-tier (exact + semantic) response cache, disk-persisted
-│   ├── content_extractor.py       # HTML/text → structured documents (replaces scraper_cleaner)
-│   ├── document_parser.py         # .docx → plain text for ingestion
+│   ├── content_extractor.py       # HTML/text to structured documents (replaces scraper_cleaner)
+│   ├── document_parser.py         # .docx to plain text for ingestion
 │   ├── chunker.py                 # Structure-aware semantic chunking
-│   ├── index_builder.py           # CSV + scraped pages → pgvector tables
+│   ├── index_builder.py           # CSV + scraped pages to pgvector tables
 │   ├── admin.py                   # AdminManager for CRUD operations
 │   ├── analytics.py               # ChatLogger + AnalyticsComputer
 │   ├── chart_generator.py         # 22 matplotlib charts as base64 PNGs
@@ -198,9 +198,9 @@ python scripts/chat.py
 ```
 
 **Generated at runtime (gitignored):**
-- `data/.response_cache.pkl` — persisted response cache
-- `eval_run_*/` — evaluation result directories
-- `chat_logs.json` — legacy chat log file (current logs live in the `chat_conversations` table)
+- `data/.response_cache.pkl`: persisted response cache
+- `eval_run_*/`: evaluation result directories
+- `chat_logs.json`: legacy chat log file (current logs live in the `chat_conversations` table)
 
 ## Pipeline (v3)
 
@@ -211,27 +211,27 @@ React UI / CLI
 FastAPI
     │
     ├── 1. Input guards (regex + embedding injection detection, scope filter)
-    ├── 2. Query rewriting  (LLM: follow-up resolution, AR→EN, expansion)
-    ├──────────  Cache lookup (exact key, then semantic ≥ 0.95)
-    │            HIT → return immediately
+    ├── 2. Query rewriting  (LLM: follow-up resolution, AR to EN, expansion)
+    ├──────────  Cache lookup (exact key, then semantic >= 0.95)
+    │            HIT: return immediately
     ├──── MISS:
-    │       ├── Admin-feedback correction lookup (pgvector ≥ 0.85)
-    │       │   FOUND → use corrected answer (re-rendered by LLM)
+    │       ├── Admin-feedback correction lookup (pgvector >= 0.85)
+    │       │   FOUND: use corrected answer (re-rendered by LLM)
     │       └── NOT FOUND:
-    │             ├── 3. Intent classification → table / page_type pre-filter
+    │             ├── 3. Intent classification: table / page_type pre-filter
     │             ├── 4. Retrieval per source
-    │             │      • Vector: single embedding reused across tables (pgvector cosine, HNSW)
-    │             │      • Keyword path (PostgreSQL FTS + RRF) implemented but DISABLED
+    │             │      - Vector: single embedding reused across tables (pgvector cosine, HNSW)
+    │             │      - Keyword path (PostgreSQL FTS + RRF) implemented but DISABLED
     │             │        (RRF weights vector=1.0, keyword=0.0; ablation showed no top-5 lift)
-    │             ├── 5. LLM rerank (gpt-4o-mini, 0–1 relevance) + source-trust boost
-    │             │      Dedup (Jaccard 0.85) → top 15 → score → min_score gate
+    │             ├── 5. LLM rerank (gpt-4o-mini, 0 to 1 relevance) + source-trust boost
+    │             │      Dedup (Jaccard 0.85), top 15, score, min_score gate
     │             ├── 6. Sufficiency check (top-score gates: confident / partial / abstain)
     │             ├── 7. Grounded generation (uses ORIGINAL query for user language)
     │             │      System prompt: role-locked, self-check, cite-or-remove
     │             │      temperature=0.0, top_p=0.85
     │             └── 8. Claim verification (LLM strict + regex safety, fail-safe fallback)
     │
-    └─→  Cache store, log conversation
+    └──>  Cache store, log conversation
         │
         ▼  JSON { answer, debug, detected_language, conversation_id }
 React renders markdown (RTL for Arabic)
@@ -263,7 +263,7 @@ Evaluation: `evaluation/run`, `evaluation/single`.
 
 Escalations: `escalations`, `escalations/{id}` (DELETE).
 
-54 endpoints in total — see `backend/main.py` for canonical definitions.
+53 endpoints in total; see `backend/main.py` for the canonical definitions.
 
 ## Configuration
 
@@ -271,8 +271,8 @@ Escalations: `escalations`, `escalations/{id}` (DELETE).
 
 | Variable | Default | Notes |
 |---|---|---|
-| `OPENAI_API_KEY` | — | Required |
-| `ADMIN_PASSWORD` | — | Required to use the admin dashboard |
+| `OPENAI_API_KEY` | (none) | Required |
+| `ADMIN_PASSWORD` | (none) | Required to use the admin dashboard |
 | `DATABASE_URL` | `postgresql://aub_library:aub_library_pass@localhost:5433/aub_library` | host port 5433 (Docker maps `5433:5432`) |
 
 ### Optional
@@ -295,15 +295,15 @@ Escalations: `escalations`, `escalations/{id}` (DELETE).
 | `library_pages` | `"{title}\n\n{content}"` | Whole pages from scraper |
 | `document_chunks` | chunk_text | Semantic chunks (preferred over `library_pages` for retrieval) |
 | `custom_notes` | `"{label}\n\n{content}"` | Faculty-authored highest-trust source |
-| `chat_conversations` | — | Logged chat turns (with retrieved chunks JSONB) |
-| `chat_feedback` | — | Admin/student feedback, with embedding for similarity lookup |
-| `escalations` | — | Librarian hand-off requests |
+| `chat_conversations` | (no embedding) | Logged chat turns (with retrieved chunks JSONB) |
+| `chat_feedback` | (query embedding only) | Admin/student feedback for similarity lookup |
+| `escalations` | (no embedding) | Librarian hand-off requests |
 
 All embedding tables have HNSW indexes (`vector_cosine_ops`) and GIN indexes for full-text search.
 
 ### Confidence thresholds
 
-Defined in `backend/chatbot.py` (`Config` class) and `backend/source_config.py`. Top-level retrieval gating now happens at the rerank stage, not at these per-collection scores — see `backend/reranker.py` for the active min-score logic.
+Defined in `backend/chatbot.py` (`Config` class) and `backend/source_config.py`. Top-level retrieval gating now happens at the rerank stage, not at these per-collection scores; see `backend/reranker.py` for the active min-score logic.
 
 ## Rebuilding indices
 
@@ -320,7 +320,7 @@ Or click "Re-index All Collections" in the admin dashboard. Re-indexing also cle
 The eval suite lives under `scripts/eval/`. Most common entry points:
 
 ```bash
-# Full suite — produces an eval_run_<timestamp>/ directory
+# Full suite: produces an eval_run_<timestamp>/ directory
 python scripts/eval/run_all_evals.py
 
 # Faster subset

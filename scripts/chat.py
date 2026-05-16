@@ -495,7 +495,7 @@ class LibraryChatbot:
             meta = results["metadatas"][0][i]
             content = EmbeddingUtils.clean_library_content(meta["content"])
             context_parts.append(f"Page: {meta['title']}\n{content}")
-            sources.append(f"{meta['title']} -- {meta['url']}")
+            sources.append(f"{meta['title']}: {meta['url']}")
 
         context = "\n\n---\n\n".join(context_parts)
 

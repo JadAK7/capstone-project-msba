@@ -3,8 +3,8 @@ intent_classifier.py
 Unified intent classification for user queries.
 
 Merges intent detection logic previously split between retriever.py (table/page_type
-routing) and chatbot.py (IntentDetector for database intent). All keyword patterns
-— English and Arabic — live here in a single canonical registry.
+routing) and chatbot.py (IntentDetector for database intent). All keyword patterns,
+English and Arabic, live here in a single canonical registry.
 """
 
 import re
@@ -13,9 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Keyword patterns — English
-# ---------------------------------------------------------------------------
+# Keyword patterns, English
 
 _HOURS_PATTERN = re.compile(
     r"\b(hours?|open(ing)?|clos(e|ing)|schedule|timing|when\s+(is|does|are)|"
@@ -93,9 +91,7 @@ _CONTACT_PATTERN = re.compile(
 )
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def classify_intent(query: str) -> dict:
     """Classify query intent for table routing and page_type filtering.
@@ -104,7 +100,7 @@ def classify_intent(query: str) -> dict:
         tables: list of tables to prioritize (None = all)
         page_types: list of page_type values to filter on (for document_chunks)
         intent: string label ("database", "hours", "contact", "faq", "general")
-        is_database_intent: bool — True if any database keyword matched (EN or AR)
+        is_database_intent: bool, True if any database keyword matched (EN or AR)
     """
     q = query.lower()
 

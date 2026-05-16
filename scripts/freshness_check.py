@@ -75,7 +75,7 @@ def _jaccard_similarity(text_a: str, text_b: str) -> float:
 
     J(A,B) = |A ∩ B| / |A ∪ B| where A and B are sets of lowercase words.
     Returns 1.0 for identical word sets, 0.0 for completely disjoint.
-    This is the metric used for "drift detection" — a score below
+    This is the metric used for "drift detection", a score below
     CONTENT_CHANGE_THRESHOLD means the page has changed significantly.
     """
     words_a = set(text_a.lower().split())
@@ -150,7 +150,7 @@ def fetch_live_content(url: str) -> str:
         })
         resp.raise_for_status()
 
-        # Extract text content (simple approach — good enough for diff detection)
+        # Extract text content (simple approach, good enough for diff detection)
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -197,7 +197,7 @@ def check_freshness(dry_run: bool = False) -> dict:
         live_text = fetch_live_content(url)
 
         if not live_text:
-            # Couldn't fetch — skip, don't count as changed
+            # Couldn't fetch, skip, don't count as changed
             continue
 
         checked += 1
@@ -238,18 +238,18 @@ def check_freshness(dry_run: bool = False) -> dict:
 
     # Decide whether to trigger rescrape
     if drift_ratio >= DRIFT_THRESHOLD and not dry_run:
-        logger.info("Drift threshold exceeded — triggering automatic rescrape")
+        logger.info("Drift threshold exceeded, triggering automatic rescrape")
         report["action_taken"] = "rescrape_triggered"
         _trigger_rescrape()
     elif dry_run:
         report["action_taken"] = "dry_run"
         if drift_ratio >= DRIFT_THRESHOLD:
-            logger.info("Drift threshold exceeded (dry run — no action taken)")
+            logger.info("Drift threshold exceeded (dry run, no action taken)")
         else:
             logger.info("Content is fresh enough (dry run)")
     else:
         report["action_taken"] = "no_action"
-        logger.info("Content is fresh enough — no rescrape needed")
+        logger.info("Content is fresh enough, no rescrape needed")
 
     return report
 
@@ -267,7 +267,7 @@ def _trigger_rescrape():
             logger.info("Rescrape already in progress")
             return
     except requests.ConnectionError:
-        logger.info("API not running — triggering rescrape directly")
+        logger.info("API not running, triggering rescrape directly")
 
     # Fallback: run scraper directly
     try:

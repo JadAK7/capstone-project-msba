@@ -131,7 +131,7 @@ def _apply_source_priority_boost(candidates: List[dict]) -> None:
 
         # Source priority boost: proportional to trust tier.
         # This is the ONLY place trust boosts are applied (not in RRF retrieval).
-        # This is a soft tiebreaker — when two chunks have similar evidence scores,
+        # This is a soft tiebreaker, when two chunks have similar evidence scores,
         # the higher-trust source wins.
         boost = cfg.rerank_source_boost_weight * trust
 
@@ -174,7 +174,7 @@ def rerank(
     # Deduplicate before reranking to avoid wasting LLM tokens on near-duplicates
     candidates = _deduplicate_candidates(candidates[:20])
 
-    # Limit input to avoid token limits — take top 15 candidates max
+    # Limit input to avoid token limits, take top 15 candidates max
     candidates = candidates[:15]
 
     # Build the scoring prompt
@@ -210,7 +210,7 @@ def rerank(
 
                         "Given a user question and numbered text passages, score each passage on "
                         "how well it provides DIRECT EVIDENCE to answer the question.\n\n"
-                        "This is NOT about topic relevance — it is about answer support.\n"
+                        "This is NOT about topic relevance, it is about answer support.\n"
                         "A passage about 'library hours' is relevant to a question about hours, "
                         "but only SUPPORTS the answer if it contains the actual hour values.\n\n"
                         "Scoring guidelines:\n"
@@ -223,7 +223,7 @@ def rerank(
                         "- A passage that mentions a topic without giving specifics scores 0.4-0.5, not 0.7+\n"
                         "- A passage that gives exact numbers/times/names/procedures scores 0.7+\n"
                         "- Prefer passages with quotable facts over passages with descriptions\n"
-                        "- Score based purely on evidence quality — source priority is handled separately\n\n"
+                        "- Score based purely on evidence quality, source priority is handled separately\n\n"
                         "Return ONLY a JSON array: [{\"index\": 0, \"score\": 0.8}, ...]. "
                         "Include ALL passages. No explanation."
                     ),

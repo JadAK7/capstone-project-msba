@@ -24,7 +24,6 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Model selection via environment variable
 #
 #   OPENAI_EMBEDDING_MODEL=text-embedding-3-small   (default, 1536 dims)
@@ -44,7 +43,6 @@ logger = logging.getLogger(__name__)
 # Changing the model OR the dimensions requires a full re-index
 # (python scripts/build_index.py). The database layer detects mismatches and
 # auto-migrates the schema on next startup.
-# ---------------------------------------------------------------------------
 
 # Native dimensions per model (used to validate user overrides)
 _NATIVE_DIMS: dict = {
@@ -111,7 +109,7 @@ def _resolve_embedding_config() -> tuple:
 
     # Whether we need to send the `dimensions` API parameter. ada-002 doesn't
     # support it; -3-* models do but only when dim != native we send it (for
-    # cleanliness — sending dimensions=native is harmless but redundant).
+    # cleanliness, sending dimensions=native is harmless but redundant).
     use_dim_param = model.startswith("text-embedding-3-") and dim != native
 
     logger.info(
@@ -233,7 +231,7 @@ def embed_text(text: str) -> List[float]:
     breaker = _breakers["embed"]
     if not breaker.allow_request():
         raise LLMUnavailableError(
-            "Embedding circuit breaker is open — too many recent failures."
+            "Embedding circuit breaker is open, too many recent failures."
         )
 
     client = _get_client()
@@ -257,7 +255,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     breaker = _breakers["embed"]
     if not breaker.allow_request():
         raise LLMUnavailableError(
-            "Embedding circuit breaker is open — too many recent failures."
+            "Embedding circuit breaker is open, too many recent failures."
         )
 
     client = _get_client()

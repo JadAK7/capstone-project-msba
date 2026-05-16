@@ -11,7 +11,7 @@ Environment variables
 
   LLM_BASE_URL        Base URL for the chat-completion endpoint.
                       Leave unset to use the official OpenAI API.
-                      OpenAI-compatible providers — set this + LLM_API_KEY:
+                      OpenAI-compatible providers, set this + LLM_API_KEY:
                         Groq:       https://api.groq.com/openai/v1
                         Together:   https://api.together.xyz/v1
                         Ollama:     http://localhost:11434/v1
@@ -26,24 +26,24 @@ Environment variables
   LLM_PROVIDER        Set to "anthropic" to use the Anthropic SDK instead of
                       the OpenAI SDK. Requires `pip install anthropic`.
                       Supported Anthropic models:
-                        claude-3-5-haiku-20241022   (fast, cheap — closest to gpt-4o-mini)
+                        claude-3-5-haiku-20241022   (fast, cheap, closest to gpt-4o-mini)
                         claude-3-5-sonnet-20241022  (balanced)
                         claude-3-opus-20240229       (most capable)
                       When LLM_PROVIDER=anthropic, set LLM_API_KEY (or
                       ANTHROPIC_API_KEY) to your Anthropic key and set
                       OPENAI_CHAT_MODEL to one of the claude-* names above.
 
-Switching providers — what changes where
+Switching providers, what changes where
 ─────────────────────────────────────────
-  OpenAI (default)          — no env vars needed beyond OPENAI_API_KEY
-  OpenAI-compatible         — set LLM_BASE_URL + LLM_API_KEY
-  Anthropic                 — set LLM_PROVIDER=anthropic + LLM_API_KEY +
+  OpenAI (default)         , no env vars needed beyond OPENAI_API_KEY
+  OpenAI-compatible        , set LLM_BASE_URL + LLM_API_KEY
+  Anthropic                , set LLM_PROVIDER=anthropic + LLM_API_KEY +
                               OPENAI_CHAT_MODEL=claude-3-5-haiku-20241022
-  Google Gemini             — NOT supported via env var; requires replacing
+  Google Gemini            , NOT supported via env var; requires replacing
                               the _call() closure with the google-generativeai
                               SDK (different message schema and response format)
 
-  Embeddings are independent — see embeddings.py / OPENAI_EMBEDDING_MODEL.
+  Embeddings are independent, see embeddings.py / OPENAI_EMBEDDING_MODEL.
   Changing the embedding provider requires a full re-index.
 
 Circuit-breaker call types
@@ -72,9 +72,7 @@ from tenacity import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Provider / model configuration  (resolved once at import time)
-# ---------------------------------------------------------------------------
 
 CHAT_MODEL: str = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini").strip()
 _LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
@@ -86,16 +84,14 @@ _LLM_API_KEY: Optional[str] = (
 )
 
 logger.info(
-    "LLM config — provider: %s  model: %s  base_url: %s",
+    "LLM config, provider: %s  model: %s  base_url: %s",
     _LLM_PROVIDER,
     CHAT_MODEL,
     _LLM_BASE_URL or "(OpenAI default)",
 )
 
 
-# ---------------------------------------------------------------------------
 # Client initialisation
-# ---------------------------------------------------------------------------
 
 _openai_client = None
 _anthropic_client = None
@@ -106,7 +102,7 @@ def _get_openai_client():
     """Return (or lazily create) the OpenAI-protocol client.
 
     Works for native OpenAI and any OpenAI-compatible provider (Groq,
-    Together, Ollama, OpenRouter, Azure …) — just set LLM_BASE_URL.
+    Together, Ollama, OpenRouter, Azure …), just set LLM_BASE_URL.
     """
     global _openai_client
     if _openai_client is None:
@@ -150,9 +146,7 @@ def _get_anthropic_client():
     return _anthropic_client
 
 
-# ---------------------------------------------------------------------------
-# Retry predicate — only retry on 429 and 5xx
-# ---------------------------------------------------------------------------
+# Retry predicate, only retry on 429 and 5xx
 
 def _is_retryable(exc: Exception) -> bool:
     """Retry on rate-limits, 5xx, transient connection drops, and timeouts."""
@@ -171,9 +165,7 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
 # Circuit breaker (per call type)
-# ---------------------------------------------------------------------------
 
 FAILURE_THRESHOLD = 5
 COOLDOWN_SECONDS = 60.0
@@ -240,9 +232,7 @@ _breakers: Dict[str, _CircuitBreaker] = {
 _breaker = _breakers["generate"]
 
 
-# ---------------------------------------------------------------------------
 # Provider call implementations
-# ---------------------------------------------------------------------------
 
 def _call_openai(
     messages: List[Dict[str, Any]],
@@ -286,7 +276,7 @@ def _call_anthropic(
     Anthropic separates the system prompt from the conversation messages.
     This adapter extracts the first system-role message (if present) and
     passes it to the `system=` kwarg, then forwards the rest as `messages`.
-    top_p is intentionally omitted — Anthropic recommends not setting both
+    top_p is intentionally omitted, Anthropic recommends not setting both
     temperature and top_p simultaneously.
     """
     client = _get_anthropic_client()
@@ -323,9 +313,7 @@ def _call_anthropic(
     return resp.content[0].text.strip()
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 class LLMUnavailableError(Exception):
     """Raised when the LLM is unavailable (circuit open or retries exhausted)."""
@@ -340,7 +328,7 @@ def chat_completion(
     top_p: float = 1.0,
     call_type: str = "generate",
 ) -> str:
-    """Resilient chat completion — provider, model, and retry are transparent.
+    """Resilient chat completion, provider, model, and retry are transparent.
 
     Args:
         messages:    Chat messages in OpenAI format ([{role, content}, ...]).
@@ -377,10 +365,10 @@ def chat_completion(
 
     except Exception as e:
         err_msg = str(e)
-        # 4xx client errors are not service outages — don't trip the breaker
+        # 4xx client errors are not service outages, don't trip the breaker
         if any(code in err_msg for code in ("400", "401", "403", "404", "422")):
             logger.error(
-                "LLM client error (not retrying) — provider=%s type=%s: %s",
+                "LLM client error (not retrying), provider=%s type=%s: %s",
                 _LLM_PROVIDER, call_type, e,
             )
             breaker.record_success()
@@ -388,7 +376,7 @@ def chat_completion(
 
         breaker.record_failure()
         logger.error(
-            "LLM call failed after retries — provider=%s type=%s: %s",
+            "LLM call failed after retries, provider=%s type=%s: %s",
             _LLM_PROVIDER, call_type, e,
         )
         raise LLMUnavailableError(

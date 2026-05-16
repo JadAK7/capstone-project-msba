@@ -120,7 +120,7 @@ function DebugPanel({ debug, detectedLanguage }) {
                               {hit.vector_score.toFixed(3)}
                             </td>
                             <td style={{ padding: '3px 6px', maxWidth: 300 }}>
-                              <div style={{ fontWeight: 500 }}>{hit.title || '—'}</div>
+                              <div style={{ fontWeight: 500 }}>{hit.title || '-'}</div>
                               <div style={{ fontSize: '0.85em', color: '#777', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                                 {hit.text_preview}
                               </div>
@@ -162,7 +162,7 @@ function DebugPanel({ debug, detectedLanguage }) {
                         {(chunk.score || 0).toFixed(3)}
                       </td>
                       <td style={{ padding: '4px 6px' }}>
-                        {chunk.page_title || chunk.text?.slice(0, 80) || '—'}
+                        {chunk.page_title || chunk.text?.slice(0, 80) || '-'}
                       </td>
                     </tr>
                   ))}
