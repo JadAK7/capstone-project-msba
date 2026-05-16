@@ -58,7 +58,7 @@ function ChatPage() {
     const history = recentMessages.map(({ role, content }) => ({ role, content }));
 
     try {
-      // Never send a language parameter -- the backend auto-detects per message
+      // Never send a language parameter: the backend auto-detects per message
       const response = await sendMessage(message, history);
       const detectedLang = response.detected_language || null;
       const assistantMessage = {
@@ -73,7 +73,7 @@ function ChatPage() {
     } catch (err) {
       let userMsg;
       if (err.message === 'TIMEOUT') {
-        userMsg = 'The request timed out. The server may be busy — please try again.';
+        userMsg = 'The request timed out. The server may be busy, please try again.';
       } else if (err.message === 'SERVICE_UNAVAILABLE') {
         userMsg = 'The service is temporarily unavailable. Please try again in a moment.';
       } else {

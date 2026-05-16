@@ -3,10 +3,10 @@ source_config.py
 Centralized configuration for multi-source RAG retrieval with source priority.
 
 Source taxonomy:
-  - faculty_text   (custom_notes table)  — Highest trust: curated by library faculty
-  - scraped_website (document_chunks + library_pages) — Second: live website content
-  - faculty_faq    (faq table)           — Lowest: short FAQ pairs, useful as fallback
-  - databases      (databases table)     — Separate: routed via intent detection, not ranked
+  - faculty_text   (custom_notes table) , Highest trust: curated by library faculty
+  - scraped_website (document_chunks + library_pages), Second: live website content
+  - faculty_faq    (faq table)          , Lowest: short FAQ pairs, useful as fallback
+  - databases      (databases table)    , Separate: routed via intent detection, not ranked
 
 All tuning knobs for source-aware retrieval live here.
 
@@ -19,9 +19,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 
-# ---------------------------------------------------------------------------
-# Source type enum — maps DB tables to logical source types
-# ---------------------------------------------------------------------------
+# Source type enum, maps DB tables to logical source types
 
 # Canonical source type names
 FACULTY_TEXT = "faculty_text"
@@ -47,9 +45,7 @@ SOURCE_TYPE_TO_TABLES: Dict[str, List[str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Source priority configuration
-# ---------------------------------------------------------------------------
 
 @dataclass
 class SourcePriorityConfig:
@@ -134,7 +130,7 @@ class SourcePriorityConfig:
 
     # --- Faculty text (custom_notes) vector floor ---
     # Custom notes are admin-curated answers. The LLM reranker scores "evidence
-    # support" — but a note like "refer to this link" has low evidence even
+    # support", but a note like "refer to this link" has low evidence even
     # though it IS the intended answer. When a custom note is topically relevant
     # (high vector similarity), we use the vector score as a floor so the
     # reranker can't kill it.
@@ -162,13 +158,11 @@ class SourcePriorityConfig:
     ])
 
 
-# Singleton config — import and use throughout the app
+# Singleton config, import and use throughout the app
 SOURCE_CONFIG = SourcePriorityConfig()
 
 
-# ---------------------------------------------------------------------------
 # Utility functions
-# ---------------------------------------------------------------------------
 
 def get_source_type(table_name: str) -> str:
     """Get the logical source type for a given DB table name."""

@@ -8,7 +8,7 @@ defaults to vector_weight=1.0, keyword_weight=0.0 because an ablation showed the
 keyword path added zero new top-5 documents on a 15-query proper-noun-heavy test
 set and did not improve grounding score (see bm25_decision.json). The keyword
 implementation here is PostgreSQL ts_rank_cd over phraseto_tsquery + plainto_tsquery
-with synonym expansion -- it is NOT Okapi BM25, despite the legacy "BM25-like" label.
+with synonym expansion: it is NOT Okapi BM25, despite the legacy "BM25-like" label.
 
 v4 (source-aware retrieval):
   - Source priority boost (gentle advantage for higher-trust sources, applied at rerank)
@@ -38,9 +38,7 @@ from .intent_classifier import classify_intent
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Synonym expansion for keyword search
-# ---------------------------------------------------------------------------
 
 _SYNONYMS_EN = {
     "hours": ["opening hours", "schedule", "timing", "open", "close"],
@@ -115,10 +113,8 @@ def _expand_synonyms(query: str) -> str:
 # Intent classification is now handled by intent_classifier.py
 
 
-# ---------------------------------------------------------------------------
 # Lexical keyword scoring: PostgreSQL ts_rank_cd over phrase + plain tsquery
-# (NOT Okapi BM25 -- different algorithm; see module docstring)
-# ---------------------------------------------------------------------------
+# (NOT Okapi BM25: different algorithm; see module docstring)
 
 def _keyword_search(
     table: str,
@@ -225,9 +221,7 @@ def _keyword_search(
         return []
 
 
-# ---------------------------------------------------------------------------
 # Vector (semantic) search
-# ---------------------------------------------------------------------------
 
 def _vector_search(
     table: str,
@@ -296,9 +290,7 @@ def _vector_search(
         return []
 
 
-# ---------------------------------------------------------------------------
 # Hybrid merge with Reciprocal Rank Fusion (RRF) + source priority boost
-# ---------------------------------------------------------------------------
 
 def _reciprocal_rank_fusion(
     vector_results: List[dict],
@@ -335,9 +327,7 @@ def _reciprocal_rank_fusion(
     return merged
 
 
-# ---------------------------------------------------------------------------
 # Table-specific retrieval configurations
-# ---------------------------------------------------------------------------
 
 _TABLE_CONFIGS = {
     "faq": {
@@ -368,9 +358,7 @@ _TABLE_CONFIGS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Source diversity: ensure minimum representation from each source
-# ---------------------------------------------------------------------------
 
 def _ensure_source_diversity(
     all_results: List[dict],
@@ -418,9 +406,7 @@ def _ensure_source_diversity(
     return reserved
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def hybrid_retrieve(
     query: str,

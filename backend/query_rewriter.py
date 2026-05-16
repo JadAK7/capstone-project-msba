@@ -3,7 +3,7 @@ query_rewriter.py
 LLM-based query rewriting with intent classification folded into the same call.
 
 Pipeline (per request):
-  1. Detect Arabic Unicode + mixed-script (hard override — always slow path).
+  1. Detect Arabic Unicode + mixed-script (hard override, always slow path).
   2. Fast-path: well-formed English, >5 words, no follow-up → skip LLM call.
      Intent falls back to keyword classifier in this case.
   3. Slow path: single LLM call that simultaneously:
@@ -26,9 +26,7 @@ from .llm_client import chat_completion, LLMUnavailableError
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Script detection helpers
-# ---------------------------------------------------------------------------
 
 # Arabic Unicode blocks: main Arabic (؀-ۿ), Supplement (ݐ-ݿ),
 # Presentation Forms-A (ﭐ-﷿), Presentation Forms-B (ﹰ-﻿).
@@ -56,7 +54,7 @@ _ARABIZI_DIGIT_RE = re.compile(
 # Interrogative scaffolding that dilutes embedding similarity against our
 # declarative corpus (FAQ answers, database descriptions, scraped page text).
 # Questions starting with these tokens must be normalized into a retrieval-
-# optimized form before embedding — otherwise the interrogative structure
+# optimized form before embedding, otherwise the interrogative structure
 # ("which ... should I use", "how do I ...") drops the top score below the
 # partial-answer threshold and the bot abstains on queries it could answer.
 _INTERROGATIVE_RE = re.compile(
@@ -86,9 +84,7 @@ def _has_arabic_context(text: str) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
 # Valid intents returned by the LLM
-# ---------------------------------------------------------------------------
 
 _VALID_LLM_INTENTS = frozenset(
     {"hours", "database", "borrowing", "contact", "general"}
@@ -101,9 +97,7 @@ _INTENT_REMAP = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Rewrite prompt — asks for JSON output including intent
-# ---------------------------------------------------------------------------
+# Rewrite prompt, asks for JSON output including intent
 
 _REWRITE_PROMPT = """\
 You are a query rewriter for a university library search system.
@@ -118,7 +112,7 @@ resolve it using the conversation history into a complete, standalone question.
 specific library question (e.g. "What are the library opening hours?", \
 "What is the borrowing policy and loan period?").
 4. Keep the rewritten query concise (1-2 sentences max).
-5. Do NOT answer the question — only rewrite it for search.
+5. Do NOT answer the question, only rewrite it for search.
 6. Preserve specific names, database names, or technical terms exactly.
 
 Return ONLY a valid JSON object (no extra text):
@@ -129,11 +123,11 @@ Return ONLY a valid JSON object (no extra text):
 }
 
 Intent definitions:
-  hours    — asking about opening/closing times, schedules
-  database — asking about research databases, e-resources, journals, finding articles
-  borrowing — asking about borrowing, returning, renewing, fines, overdue
-  contact  — asking for contact info, email, phone, directions, librarian
-  general  — anything else about library services or policies"""
+  hours   , asking about opening/closing times, schedules
+  database, asking about research databases, e-resources, journals, finding articles
+  borrowing, asking about borrowing, returning, renewing, fines, overdue
+  contact , asking for contact info, email, phone, directions, librarian
+  general , anything else about library services or policies"""
 
 
 def rewrite_query(
@@ -172,7 +166,7 @@ def rewrite_query(
     # Fast path: well-formed English query that needs no rewriting.
     # Hard overrides (always slow path):
     #   - Arabic Unicode, mixed-script, or Arabizi
-    #   - Interrogative form — embedding scoring against our declarative
+    #   - Interrogative form, embedding scoring against our declarative
     #     corpus drops below the abstain threshold otherwise.
     if (
         not has_arabic
@@ -247,7 +241,7 @@ def rewrite_query(
                     raw[:200],
                 )
 
-        # JSON parse failed — if raw text looks like a plain query, use it
+        # JSON parse failed, if raw text looks like a plain query, use it
         if raw and 5 < len(raw) < 300 and "\n" not in raw:
             debug["rewritten_query"] = raw.strip()
             debug["rewrite_fallback"] = True

@@ -1,5 +1,5 @@
 """
-chunker.py — Structure-aware chunking for RAG.
+chunker.py, Structure-aware chunking for RAG.
 
 Takes the extracted-page output from content_extractor.py and produces
 embeddable chunks with context headers. Chunking strategy adapts to
@@ -35,7 +35,7 @@ MIN_CHUNK_SIZE = 60
 OVERLAP_SIZE = 75       # overlap between consecutive text chunks
 
 # Safety cap: if a single page produces more than this many chunks, it's
-# almost certainly a bloated newsletter/report — keep only the first N.
+# almost certainly a bloated newsletter/report, keep only the first N.
 MAX_CHUNKS_PER_PAGE = 40
 
 
@@ -186,7 +186,7 @@ def _chunk_schedule_blocks(
 
     # ── Combined chunk (all entities) ──
     if len(entity_texts) > 1:
-        combined_parts = [f"{page_title} — Opening Hours (All Locations)"]
+        combined_parts = [f"{page_title}, Opening Hours (All Locations)"]
         for heading, text in entity_texts:
             if heading:
                 combined_parts.append(f"\n{heading}:\n{text}")
@@ -194,7 +194,7 @@ def _chunk_schedule_blocks(
                 combined_parts.append(f"\n{text}")
         combined = "\n".join(combined_parts)
 
-        # Allow up to 4× max for combined schedules — a single retrieval
+        # Allow up to 4× max for combined schedules, a single retrieval
         # should return ALL locations.  6 libraries × ~150 chars ≈ 900 chars
         # plus closures can push to 2-3K.  Embedding models handle this fine.
         for sub in _split_text(combined, MAX_CHUNK_SIZE * 4):
@@ -275,7 +275,7 @@ def _chunk_faq_blocks(
             })
             idx += 1
         else:
-            # Non-pair FAQ content — chunk as text
+            # Non-pair FAQ content, chunk as text
             for sub in _split_text(content):
                 chunks.append({
                     "chunk_text": sub,
@@ -382,7 +382,7 @@ def chunk_page(extracted_page: Dict) -> List[Dict]:
             })
 
     # Safety cap: bloated pages (newsletters, reports) can produce thousands
-    # of tiny chunks.  Keep only the first N — if a page needs more than 40
+    # of tiny chunks.  Keep only the first N, if a page needs more than 40
     # chunks it's not useful chatbot content.
     if len(all_chunks) > MAX_CHUNKS_PER_PAGE:
         logger.warning(

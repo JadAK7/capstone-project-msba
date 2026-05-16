@@ -57,7 +57,7 @@ def parse_docx(file_bytes: bytes) -> str:
                 parts.append(text)
 
         elif tag == "tbl":
-            # Table — extract each row as tab-separated cells
+            # Table, extract each row as tab-separated cells
             from docx.oxml.ns import qn
             rows = element.findall(f".//{qn('w:tr')}")
             for row in rows:

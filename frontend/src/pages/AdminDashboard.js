@@ -64,7 +64,7 @@ function Toast({ message, type, onClose }) {
 }
 
 // ---------------------------------------------------------------------------
-// Persistent operation banner — shows across all tabs until manually dismissed
+// Persistent operation banner, shows across all tabs until manually dismissed
 // (only the "running" state is non-dismissable; success/error stays until X)
 // ---------------------------------------------------------------------------
 function PersistentBanner({ label, status, message, onClose }) {
@@ -307,7 +307,7 @@ function SystemStatusTab({ scraping, onRescrape, restoring, onRestore }) {
         {/* Backup */}
         <div className="admin-backup-panel">
           <p className="admin-backup-desc">
-            Download a full SQL dump of the database. Store it somewhere safe — it
+            Download a full SQL dump of the database. Store it somewhere safe, it
             includes all conversations, feedback, FAQs, and embeddings.
           </p>
           <button
@@ -318,7 +318,7 @@ function SystemStatusTab({ scraping, onRescrape, restoring, onRestore }) {
             {backingUp ? (
               <span className="admin-btn-loading">Generating backup…</span>
             ) : (
-              '⬇ Download Backup'
+              'Download Backup'
             )}
           </button>
         </div>
@@ -326,7 +326,7 @@ function SystemStatusTab({ scraping, onRescrape, restoring, onRestore }) {
         {/* Restore */}
         <div className="admin-restore-panel">
           <p className="admin-backup-desc admin-restore-warning">
-            ⚠️ Restore will <strong>replace all current data</strong> with the contents
+            Warning: Restore will <strong>replace all current data</strong> with the contents
             of the backup file. Only upload <code>.backup</code> files produced by this dashboard.
           </p>
           <div className="admin-restore-row">
@@ -657,7 +657,7 @@ function DataManagementTab({ scraping, onRescrape }) {
         <div>
           <div className="admin-info-note">
             Upload Word (.docx) documents to add them to the knowledge base. They will be parsed,
-            chunked, and embedded automatically — the chatbot will use them to answer questions.
+            chunked, and embedded automatically, the chatbot will use them to answer questions.
           </div>
           <div className="admin-actions-bar" style={{ alignItems: 'center', gap: '0.75rem' }}>
             <label className="admin-btn admin-btn-primary" style={{ cursor: 'pointer', marginBottom: 0 }}>
@@ -708,7 +708,7 @@ function DataManagementTab({ scraping, onRescrape }) {
                       {doc.preview && doc.preview.length >= 200 ? '…' : ''}
                     </td>
                     <td style={{ whiteSpace: 'nowrap', fontSize: '0.85em' }}>
-                      {doc.created_at ? new Date(doc.created_at).toLocaleDateString() : '—'}
+                      {doc.created_at ? new Date(doc.created_at).toLocaleDateString() : '-'}
                     </td>
                     <td>
                       <button
@@ -1278,7 +1278,7 @@ function UnansweredQueriesTab() {
         color: '#444',
       }}>
         Library-related questions the chatbot abstained on (low retrieval confidence).
-        Click <strong>Answer</strong> to write a response — it gets saved as a custom note
+        Click <strong>Answer</strong> to write a response, it gets saved as a custom note
         and indexed into the knowledge base immediately.
       </div>
       {unanswered.queries && unanswered.queries.length > 0 ? (
@@ -2006,7 +2006,7 @@ function AdminDashboard() {
   const [scraping, setScraping] = useState(false);
   const [scrapeBanner, setScrapeBanner] = useState(null);
 
-  // Restore: same pattern — lifted so banner survives tab switches.
+  // Restore: same pattern, lifted so banner survives tab switches.
   const [restoring, setRestoring] = useState(false);
   const [restoreBanner, setRestoreBanner] = useState(null);
 
@@ -2073,7 +2073,7 @@ function AdminDashboard() {
   const handleRestore = useCallback(async (file) => {
     if (!file) return;
     if (!window.confirm(
-      `⚠️ WARNING: Restoring from "${file.name}" will REPLACE all current data — ` +
+      `WARNING: Restoring from "${file.name}" will REPLACE all current data, ` +
       'conversations, feedback, FAQs, and all embeddings.\n\n' +
       'This cannot be undone. Are you absolutely sure?'
     )) return;

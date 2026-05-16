@@ -4,7 +4,7 @@ Scrapes pages from the AUB library website using requests + BeautifulSoup.
 Stores results in PostgreSQL with pgvector embeddings.
 
 Note: this is a static (non-JS-rendering) scraper. JavaScript-only content
-(e.g. dynamically rendered opening hours) will not be captured here — those
+(e.g. dynamically rendered opening hours) will not be captured here, those
 should be sourced from the FAQ CSV or maintained as a custom_note.
 """
 

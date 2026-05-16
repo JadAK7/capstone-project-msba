@@ -1,14 +1,14 @@
 """
-content_extractor.py — Generic, page-agnostic content extraction from HTML/text.
+content_extractor.py, Generic, page-agnostic content extraction from HTML/text.
 
 Replaces the previous scraper_cleaner + document_processor pipeline with a
 unified layered strategy that adapts to whatever structure the page provides:
 
-  Layer 1  Semantic HTML — headings, <table>, <ul>/<ol>, <section>, <article>
-  Layer 2  DOM block detection — content-density scoring, repeated-sibling
+  Layer 1  Semantic HTML, headings, <table>, <ul>/<ol>, <section>, <article>
+  Layer 2  DOM block detection, content-density scoring, repeated-sibling
            patterns (cards, accordion items, div-based tables)
-  Layer 3  Text pattern detection — schedules, FAQ pairs, contacts, policies
-  Layer 4  Fallback — paragraph-boundary splitting
+  Layer 3  Text pattern detection, schedules, FAQ pairs, contacts, policies
+  Layer 4  Fallback, paragraph-boundary splitting
 
 Each layer enriches or replaces the previous when it finds richer structure.
 No site-specific selectors or hardcoded page names.
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Configuration — all generic, nothing site-specific
+# Configuration, all generic, nothing site-specific
 # ============================================================================
 
 # Tags whose entire subtree is never useful content
@@ -104,7 +104,7 @@ _INLINE_PARENTS = {"table", "ul", "ol", "li", "tr", "td", "th", "dl", "dt", "dd"
 
 
 # ============================================================================
-# Pattern regexes — generic, not site-specific
+# Pattern regexes, generic, not site-specific
 # ============================================================================
 
 _TIME_RANGE_RE = re.compile(
@@ -305,7 +305,7 @@ def _find_main_content(soup) -> "Tag":
 
 
 # ============================================================================
-# Layer 1 — Semantic extraction (headings, tables, lists, sections)
+# Layer 1, Semantic extraction (headings, tables, lists, sections)
 # ============================================================================
 
 def _extract_accordion_blocks(soup) -> List[Dict]:
@@ -532,7 +532,7 @@ def _semantic_extract(root) -> List[Dict]:
 
 
 # ============================================================================
-# Layer 2 — DOM block detection (repeated siblings, content density)
+# Layer 2, DOM block detection (repeated siblings, content density)
 # ============================================================================
 
 def _class_signature(el) -> Tuple:
@@ -710,7 +710,7 @@ def _dom_block_extract(root, semantic_blocks: List[Dict]) -> List[Dict]:
 
 
 # ============================================================================
-# Layer 3 — Text-pattern detection
+# Layer 3, Text-pattern detection
 # ============================================================================
 
 def _has_schedule_pattern(text: str) -> bool:
@@ -743,7 +743,7 @@ def _preprocess_schedule_text(text: str) -> str:
 
     # Walk through day positions.  If there's significant non-schedule text
     # (>8 chars) between the end of one time-block and the next day name,
-    # that gap is likely an entity header — insert a newline before it.
+    # that gap is likely an entity header, insert a newline before it.
     result = []
     prev_end = 0
     for pos in day_positions:
@@ -775,7 +775,7 @@ def _preprocess_schedule_text(text: str) -> str:
 def _split_schedule_entities(text: str) -> List[Dict]:
     """Split a schedule blob into one block per entity/location.
 
-    Generic algorithm — no hardcoded location names:
+    Generic algorithm, no hardcoded location names:
       1. Pre-process single-line blobs to insert line breaks at entity boundaries.
       2. Split text into lines.
       3. Lines that contain day/time info are schedule lines.
@@ -806,7 +806,7 @@ def _split_schedule_entities(text: str) -> List[Dict]:
         has_day = bool(_DAY_RE.search(stripped))
 
         if has_time or has_day:
-            # Line is schedule data — but it might also start with an entity name
+            # Line is schedule data, but it might also start with an entity name
             # Detect "Entity Name Monday - Friday: 8am-5pm" pattern
             day_match = _DAY_RE.search(stripped)
             if day_match and day_match.start() > 10:
@@ -847,7 +847,7 @@ def _split_schedule_entities(text: str) -> List[Dict]:
                     current_schedule = []
                 current_header = stripped.rstrip(":")
         else:
-            # Long line without time — add as note
+            # Long line without time, add as note
             current_schedule.append(stripped)
 
     if current_schedule:
@@ -857,9 +857,9 @@ def _split_schedule_entities(text: str) -> List[Dict]:
         })
 
     if len(entities) <= 1:
-        return []   # No useful split — caller keeps the original block
+        return []   # No useful split, caller keeps the original block
 
-    # If none of the entities have a header, the split isn't meaningful —
+    # If none of the entities have a header, the split isn't meaningful;
     # these are just day/time lines belonging to one unnamed entity.
     # Return empty so the caller keeps the block as-is (with its heading).
     if not any(e["header"] for e in entities):
@@ -943,7 +943,7 @@ def _detect_patterns(blocks: List[Dict]) -> List[Dict]:
 
         # ── Schedule detection ──
         if _has_schedule_pattern(text):
-            # Tables are already structured — don't try to re-split them.
+            # Tables are already structured, don't try to re-split them.
             # Just tag the block as schedule and keep it intact.
             if block.get("content_format") == "table":
                 block["block_type"] = "schedule"
@@ -996,7 +996,7 @@ def _detect_patterns(blocks: List[Dict]) -> List[Dict]:
 
 
 # ============================================================================
-# Layer 4 — Fallback paragraph splitting
+# Layer 4, Fallback paragraph splitting
 # ============================================================================
 
 def _fallback_paragraph_blocks(text: str, target_size: int = 600) -> List[Dict]:

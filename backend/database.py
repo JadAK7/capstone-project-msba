@@ -273,7 +273,7 @@ def _migrate_embedding_dimensions(conn, target_dim: int) -> None:
         embedding column is replaced.  All data must be rebuilt via
         `python scripts/build_index.py`.
       - chat_feedback rows are PRESERVED; only the embedding column is
-        replaced (values become NULL — they are regenerated when feedback
+        replaced (values become NULL; they are regenerated when feedback
         is re-submitted).
 
     This runs automatically in init_db() and is a no-op when dimensions match.

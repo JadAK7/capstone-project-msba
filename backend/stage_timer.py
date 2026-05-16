@@ -10,7 +10,7 @@ Usage:
 
 Multiple calls to time() with the same stage name are accumulated (summed),
 which handles stages that span multiple non-contiguous code blocks (e.g.
-cache_lookup happens in three places — the total is their combined time).
+cache_lookup happens in three places, the total is their combined time).
 """
 
 import time

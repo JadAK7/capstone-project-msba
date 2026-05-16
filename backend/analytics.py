@@ -1,7 +1,7 @@
 """
 analytics.py
 Chat logging and analytics computation for the admin dashboard.
-All data is stored in PostgreSQL (chat_conversations table) — no file-based logging.
+All data is stored in PostgreSQL (chat_conversations table), no file-based logging.
 Data persists across container restarts.
 """
 
@@ -320,7 +320,7 @@ class AnalyticsComputer:
         """Return relevant (in-scope) queries the bot could not answer.
 
         These are queries the chatbot abstained on because retrieval context
-        was below the confidence threshold — but the input guards did NOT
+        was below the confidence threshold, but the input guards did NOT
         flag them as out-of-scope, so they are legitimate library questions
         the knowledge base is missing answers for.
         """
@@ -379,9 +379,7 @@ class AnalyticsComputer:
             logger.error(f"Failed to compute unanswered queries: {e}")
             return {"total_unanswered": 0, "total_queries": 0, "queries": []}
 
-    # ------------------------------------------------------------------
     # Extended analytics for the charts dashboard
-    # ------------------------------------------------------------------
 
     def compute_extended_summary(self) -> dict:
         """Compute extended summary stats for the charts dashboard."""

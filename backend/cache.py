@@ -117,7 +117,7 @@ class ResponseCache:
             self._misses += 1
             return None
 
-        # Cache hit -- move to end (most recently used)
+        # Cache hit: move to end (most recently used)
         self._store.move_to_end(key)
         self._hits += 1
         return value
@@ -324,7 +324,7 @@ class ResponseCache:
                     to_save[key] = (timestamp, value, embedding)
 
             if not to_save:
-                # Nothing to save — remove stale file if it exists
+                # Nothing to save, remove stale file if it exists
                 if os.path.exists(self._persist_path):
                     os.remove(self._persist_path)
                 return

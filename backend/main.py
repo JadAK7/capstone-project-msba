@@ -39,7 +39,7 @@ from .llm_client import is_llm_available, llm_info
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Rate limiter — sliding window per IP
+# Rate limiter, sliding window per IP
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(title="AUB Libraries Assistant API")
@@ -54,13 +54,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
 # Admin authentication (env-based credentials + HMAC token)
-# ---------------------------------------------------------------------------
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-# Random secret generated per process — tokens invalidate on restart
+# Random secret generated per process, tokens invalidate on restart
 _TOKEN_SECRET = os.environ.get("ADMIN_TOKEN_SECRET", secrets.token_hex(32))
 _TOKEN_TTL = 24 * 3600  # 24 hours
 
@@ -167,9 +165,7 @@ def _invalidate_cache_after_edit():
         _chatbot.clear_cache()
 
 
-# ---------------------------------------------------------------------------
 # Pydantic models
-# ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
     message: str
@@ -225,9 +221,7 @@ class LoginRequest(BaseModel):
     password: str
 
 
-# ---------------------------------------------------------------------------
 # Admin login
-# ---------------------------------------------------------------------------
 
 @app.post("/api/admin/login")
 def admin_login(req: LoginRequest):
@@ -269,9 +263,7 @@ async def admin_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-# ---------------------------------------------------------------------------
 # Startup
-# ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 async def startup():
@@ -295,9 +287,7 @@ async def shutdown():
     close_db()
 
 
-# ---------------------------------------------------------------------------
 # Existing chatbot endpoints
-# ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 def health():
@@ -448,9 +438,7 @@ def status():
     return {"indices_ready": IndexBuilder.indices_exist()}
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Collection browsing
-# ---------------------------------------------------------------------------
+# Admin endpoints: Collection browsing
 
 @app.get("/api/admin/collections")
 def admin_list_collections():
@@ -478,9 +466,7 @@ def admin_get_entries(collection_name: str, offset: int = 0, limit: int = 20):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- FAQ CRUD
-# ---------------------------------------------------------------------------
+# Admin endpoints: FAQ CRUD
 
 @app.post("/api/admin/faq")
 def admin_add_faq(req: FAQRequest):
@@ -530,9 +516,7 @@ def admin_delete_faq(entry_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Database CRUD
-# ---------------------------------------------------------------------------
+# Admin endpoints: Database CRUD
 
 @app.post("/api/admin/database")
 def admin_add_database(req: DatabaseRequest):
@@ -582,9 +566,7 @@ def admin_delete_database(entry_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Custom Notes CRUD
-# ---------------------------------------------------------------------------
+# Admin endpoints: Custom Notes CRUD
 
 @app.post("/api/admin/custom-note")
 def admin_add_custom_note(req: CustomNoteRequest):
@@ -628,9 +610,7 @@ def admin_delete_custom_note(entry_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Word Document upload/list/delete
-# ---------------------------------------------------------------------------
+# Admin endpoints: Word Document upload/list/delete
 
 @app.post("/api/admin/documents/upload")
 async def admin_upload_document(
@@ -678,9 +658,7 @@ def admin_delete_document(entry_id: str, _user: str = Depends(require_admin)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Library Pages (delete only)
-# ---------------------------------------------------------------------------
+# Admin endpoints: Library Pages (delete only)
 
 @app.get("/api/admin/document-chunks/search")
 def admin_search_document_chunks(q: str, offset: int = 0, limit: int = 20):
@@ -752,9 +730,7 @@ def admin_delete_library_page(entry_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Re-indexing
-# ---------------------------------------------------------------------------
+# Admin endpoints: Re-indexing
 
 @app.post("/api/admin/reindex")
 def admin_reindex():
@@ -787,9 +763,7 @@ def admin_reindex():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- System info
-# ---------------------------------------------------------------------------
+# Admin endpoints: System info
 
 @app.get("/api/admin/system-info")
 def admin_system_info():
@@ -823,9 +797,7 @@ def admin_clear_cache():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
 # Analytics endpoints
-# ---------------------------------------------------------------------------
 
 @app.get("/api/admin/analytics/summary")
 def analytics_summary():
@@ -938,15 +910,13 @@ def analytics_charts():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Database backup & restore (pure Python, no pg_dump/psql)
+# Admin endpoints: Database backup & restore (pure Python, no pg_dump/psql)
 #
-# Uses psycopg2's COPY protocol directly — no external binaries required.
+# Uses psycopg2's COPY protocol directly, no external binaries required.
 # Works whether PostgreSQL is in Docker, on the host, or remote.
 #
 # Backup format: JSON file containing one CSV block per table.
 # File extension: .backup  (to distinguish from raw SQL dumps)
-# ---------------------------------------------------------------------------
 
 # Tables exported in this order (respects FK dependencies on restore).
 _BACKUP_TABLES = [
@@ -971,7 +941,7 @@ def _table_exists(cur, table: str) -> bool:
 
 @app.get("/api/admin/backup")
 def admin_backup_db(_user: str = Depends(require_admin)):
-    """Export all tables to a .backup file using psycopg2 COPY — no pg_dump needed.
+    """Export all tables to a .backup file using psycopg2 COPY, no pg_dump needed.
 
     The file is JSON containing one CSV block per table.  Restore it with
     POST /api/admin/restore.
@@ -1042,7 +1012,7 @@ async def admin_restore_db(
     try:
         backup = _json.loads(raw.decode("utf-8"))
     except Exception:
-        raise HTTPException(status_code=400, detail="File is not valid JSON — is it a .backup file?")
+        raise HTTPException(status_code=400, detail="File is not valid JSON, is it a .backup file?")
 
     if backup.get("version") not in ("2.0",):
         raise HTTPException(
@@ -1098,9 +1068,7 @@ async def admin_restore_db(
     }
 
 
-# ---------------------------------------------------------------------------
-# Admin endpoints -- Rescrape library website
-# ---------------------------------------------------------------------------
+# Admin endpoints: Rescrape library website
 
 def _run_scrape():
     """Background task: scrape AUB library website and rebuild library_pages."""
@@ -1178,9 +1146,7 @@ def admin_rescrape_status():
     return _get_scrape_status()
 
 
-# ---------------------------------------------------------------------------
 # Freshness check endpoint
-# ---------------------------------------------------------------------------
 
 _freshness_status = {
     "last_check": None,
@@ -1253,9 +1219,7 @@ _freshness_thread = threading.Thread(target=_run_scheduled_freshness_check, daem
 _freshness_thread.start()
 
 
-# ---------------------------------------------------------------------------
 # Conversations & Feedback endpoints
-# ---------------------------------------------------------------------------
 
 
 @app.get("/api/admin/conversations")
@@ -1507,9 +1471,7 @@ def feedback_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
 # Evaluation endpoints
-# ---------------------------------------------------------------------------
 
 
 class EvaluationRequest(BaseModel):
@@ -1577,9 +1539,7 @@ def evaluate_single_question(req: SingleEvalRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
 # Escalation endpoints
-# ---------------------------------------------------------------------------
 
 
 @app.post("/api/escalate")
@@ -1672,9 +1632,7 @@ def delete_escalation(escalation_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
 # Serve React build in production
-# ---------------------------------------------------------------------------
 
 _frontend_build = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "build")
 if os.path.isdir(_frontend_build):
@@ -1702,5 +1660,5 @@ if os.path.isdir(_frontend_build):
         file_path = os.path.join(_frontend_build, full_path)
         if full_path and os.path.isfile(file_path):
             return FileResponse(file_path)
-        # Otherwise serve index.html — React Router handles the route
+        # Otherwise serve index.html, React Router handles the route
         return FileResponse(os.path.join(_frontend_build, "index.html"))

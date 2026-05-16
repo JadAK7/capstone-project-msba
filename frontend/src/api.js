@@ -79,7 +79,7 @@ export function adminLogout() {
 
 export async function sendMessage(message, history = []) {
   // Language is always auto-detected by the backend from the message text.
-  // No language parameter is sent -- this ensures per-message detection works
+  // No language parameter is sent: this ensures per-message detection works
   // correctly even when the user alternates between Arabic and English.
   const body = { message };
   if (history.length > 0) {
@@ -124,7 +124,7 @@ export async function checkHealth() {
 }
 
 // ---------------------------------------------------------------------------
-// Public feedback (no auth required — used from chat UI)
+// Public feedback (no auth required, used from chat UI)
 // ---------------------------------------------------------------------------
 
 export async function submitPublicFeedback(conversationId, rating, comment = null) {
@@ -144,7 +144,7 @@ export async function submitPublicFeedback(conversationId, rating, comment = nul
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Collections
+// Admin API: Collections
 // ---------------------------------------------------------------------------
 
 export async function getCollections() {
@@ -163,7 +163,7 @@ export async function getCollectionEntries(name, offset = 0, limit = 20) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- FAQ CRUD
+// Admin API: FAQ CRUD
 // ---------------------------------------------------------------------------
 
 export async function addFAQ(question, answer) {
@@ -191,7 +191,7 @@ export async function deleteFAQ(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Database CRUD
+// Admin API: Database CRUD
 // ---------------------------------------------------------------------------
 
 export async function addDatabase(name, description) {
@@ -219,7 +219,7 @@ export async function deleteDatabase(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Custom Notes CRUD
+// Admin API: Custom Notes CRUD
 // ---------------------------------------------------------------------------
 
 export async function addCustomNote(label, content) {
@@ -247,7 +247,7 @@ export async function deleteCustomNote(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Word Documents
+// Admin API: Word Documents
 // ---------------------------------------------------------------------------
 
 export async function uploadDocument(file) {
@@ -280,7 +280,7 @@ export async function deleteDocument(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Library Pages
+// Admin API: Library Pages
 // ---------------------------------------------------------------------------
 
 export async function searchDocumentChunks(query, offset = 0, limit = 20) {
@@ -309,7 +309,7 @@ export async function deleteLibraryPage(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Rescrape library website
+// Admin API: Rescrape library website
 // ---------------------------------------------------------------------------
 
 export async function triggerRescrape() {
@@ -327,7 +327,7 @@ export async function getRescrapeStatus() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Re-indexing & System Info
+// Admin API: Re-indexing & System Info
 // ---------------------------------------------------------------------------
 
 export async function triggerReindex() {
@@ -353,7 +353,7 @@ export async function clearCache() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Database backup & restore
+// Admin API: Database backup & restore
 // ---------------------------------------------------------------------------
 
 /**
@@ -377,7 +377,7 @@ export async function downloadBackup() {
 
 /**
  * Upload a .backup file and restore the database from it.
- * This is destructive — all existing data will be replaced.
+ * This is destructive, all existing data will be replaced.
  */
 export async function restoreDatabase(file) {
   const token = getStoredToken();
@@ -395,7 +395,7 @@ export async function restoreDatabase(file) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Analytics
+// Admin API: Analytics
 // ---------------------------------------------------------------------------
 
 export async function getAnalyticsSummary() {
@@ -437,7 +437,7 @@ export async function getAnalyticsCharts() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Conversations & Feedback
+// Admin API: Conversations & Feedback
 // ---------------------------------------------------------------------------
 
 export async function getConversations(offset = 0, limit = 30, ratingFilter = null) {
@@ -497,7 +497,7 @@ export async function getFeedbackStats() {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Evaluation
+// Admin API: Evaluation
 // ---------------------------------------------------------------------------
 
 export async function runEvaluation(questions, language = null) {
@@ -546,7 +546,7 @@ export async function deleteEscalation(escalationId) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin API -- Evaluation
+// Admin API: Evaluation
 // ---------------------------------------------------------------------------
 
 export async function runSingleEvaluation(question, language = null) {

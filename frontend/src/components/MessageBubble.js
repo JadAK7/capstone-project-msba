@@ -64,7 +64,7 @@ function MessageBubble({ message, onFeedback }) {
           <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown>
         </div>
 
-        {/* Feedback buttons — hidden once feedback is given */}
+        {/* Feedback buttons, hidden once feedback is given */}
         {showFeedback && !showForm && feedbackGiven === null && (
           <div className="message-feedback">
             <button
@@ -90,7 +90,7 @@ function MessageBubble({ message, onFeedback }) {
           </div>
         )}
 
-        {/* Feedback form — appears after thumbs down */}
+        {/* Feedback form, appears after thumbs down */}
         {showForm && feedbackGiven === null && (
           <div className="feedback-form">
             <p className="feedback-form-label">
